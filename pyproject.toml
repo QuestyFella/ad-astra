@@ -9,9 +9,15 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+tetra3 = [
+    "tetra3 @ git+https://github.com/esa/tetra3.git",
+    "scipy>=1.7",
+    "Pillow>=8.3",
+]
 dev = [
     "pytest>=7",
     "pytest-cov>=4",
+    "ad-astra[tetra3]",
 ]
 
 [project.scripts]
