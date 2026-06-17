@@ -19,3 +19,6 @@ mobile/web-build/
 mobile/ios/
 mobile/android/
 *.tsbuildinfo
+
+# Rust
+native/*/target/

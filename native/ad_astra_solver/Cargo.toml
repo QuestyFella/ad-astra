@@ -1,0 +1,11 @@
+[package]
+name = "ad_astra_solver"
+version = "0.1.0"
+edition = "2021"
+description = "Offline plate solver runtime for Ad Astra"
+
+[dependencies]
+thiserror = "1"
+
+[dev-dependencies]
+tempfile = "3"
