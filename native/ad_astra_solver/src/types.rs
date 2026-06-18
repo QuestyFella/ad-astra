@@ -18,6 +18,24 @@ pub struct SolveSourcesRequest {
     pub solve_timeout_ms: Option<f64>,
 }
 
+/// A detected star for overlay display.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DetectedStar {
+    pub x_px: f64,
+    pub y_px: f64,
+    pub brightness: f64,
+}
+
+/// A star matched between image and catalog.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatchedStarInfo {
+    pub image_x: f64,
+    pub image_y: f64,
+    pub catalog_id: u32,
+    pub ra_deg: f64,
+    pub dec_deg: f64,
+}
+
 /// Result of a plate solve.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SolveResult {
@@ -34,6 +52,8 @@ pub struct SolveResult {
     pub solve_time_ms: u64,
     pub database_id: Option<String>,
     pub log: Vec<String>,
+    pub detected_stars: Vec<DetectedStar>,
+    pub matched_star_positions: Vec<MatchedStarInfo>,
 }
 
 impl SolveResult {
@@ -52,6 +72,8 @@ impl SolveResult {
             solve_time_ms: 0,
             database_id: None,
             log,
+            detected_stars: Vec::new(),
+            matched_star_positions: Vec::new(),
         }
     }
 }

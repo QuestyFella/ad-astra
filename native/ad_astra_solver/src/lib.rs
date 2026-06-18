@@ -1,9 +1,13 @@
 pub mod db;
 pub mod error;
+pub mod geometry;
+pub mod hash;
 pub mod solve;
 pub mod types;
 
 pub use db::{AdbDatabase, AdbHeader, PatternRecord, StarRecord};
 pub use error::SolverError;
+pub use geometry::{Affine2D, TangentPlane, Vec3};
+pub use hash::{HashIndex, HashKey, HashResult, ImageQuad, QuadFeature};
 pub use solve::solve_sources;
-pub use types::{ImageSource, SolveResult, SolveSourcesRequest};
+pub use types::{DetectedStar, ImageSource, MatchedStarInfo, SolveResult, SolveSourcesRequest};
