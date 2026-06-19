@@ -4,14 +4,13 @@ Offline plate-solving engine for mobile devices. Takes a sky image and
 returns celestial coordinates (RA, Dec), field-of-view, and rotation —
 completely offline, no network required.
 
-## How it works
+Built on star catalog databases from [ESA's Tetra3](https://github.com/esa/tetra3)
+plate-solving library. Ad Astra converts these into a compact binary
+format (`.adb`) and ships its own Rust solver — no NumPy or Python runtime
+needed at solve time. The mobile app (Expo / React Native) provides camera
+capture, solving UI, and results display.
 
-Uses star catalog databases from [ESA's Tetra3](https://github.com/esa/tetra3)
-plate-solving library as input. Ad Astra converts these NumPy `.npz`
-databases into a compact binary format (`.adb`) and provides its own
-lightweight Rust solver — no NumPy, SciPy, or Python runtime needed at
-solve time. A Tetra3 adapter is also included as a reference solver
-backend for development and testing.
+## How it works
 
 1. **Database conversion** (Python) — converts Tetra3 `.npz` databases
    (Hipparcos/Tycho-2 stars, geometric quad patterns) into the fixed-layout
@@ -19,6 +18,8 @@ backend for development and testing.
 2. **Plate solving** (Rust) — reads the `.adb` database, hashes quads
    from image sources, looks up candidates by hash, then verifies via
    multi-scale geometric matching with radial-distortion correction.
+3. **Mobile app** (Expo / React Native) — camera capture, source extraction,
+   solver invocation, and results display with star overlays.
 
 ## Project structure
 
@@ -26,11 +27,11 @@ backend for development and testing.
 ad-astra/
   src/ad_astra/            # Python: catalog, indexing, projection, CLI
   native/ad_astra_solver/  # Rust: offline plate solver (reads .adb)
+  mobile/                  # Expo / React Native app (camera, solving, results)
   scripts/                 # Catalog prep & database build scripts
   tests/                   # Python unit tests
   data/                     # Raw & processed catalog data (gitignored)
   docs/                    # Architecture & format documentation
-  mobile/                  # React Native app (future)
 ```
 
 ## Quick start
@@ -49,6 +50,14 @@ pytest
 cd native/ad_astra_solver
 cargo test                  # unit tests
 cargo test -- --ignored     # integration tests (requires .adb database)
+```
+
+### Mobile app (Expo / React Native)
+
+```bash
+cd mobile
+npm install
+npm start                   # Expo dev server (press i for iOS, a for Android)
 ```
 
 ## Database format
