@@ -139,6 +139,26 @@ pub fn compute_quad_hash(dist: &DistMat, bin_size: f64) -> Option<HashResult> {
         (x1, y1, x0, y0, [inner[1], inner[0]])
     };
 
+    // Canonicalise baseline direction: the hash depends on which endpoint
+    // is "A" (bi) vs "B" (bj) because x is measured from A.  Swapping
+    // A↔B maps x → 1-x for every inner star, which can flip the inner
+    // sort order and produce a different hash key.  Since the input
+    // order of the 4 points is arbitrary (image sources vs catalog
+    // patterns may order them differently), we enforce a canonical
+    // direction: the first inner star (after sort) must have x ≤ 0.5.
+    // If it doesn't, swap the baseline endpoints and re-sort.
+    let (bi, bj, ax, ay, bx, by, inner_order) = if ax <= 0.5 {
+        (bi, bj, ax, ay, bx, by, inner_order)
+    } else {
+        // Swap baseline: x → 1-x for both inner stars; y is unchanged.
+        let (nax, nbx) = (1.0 - ax, 1.0 - bx);
+        if (nax, ay) <= (nbx, by) {
+            (bj, bi, nax, ay, nbx, by, inner_order)
+        } else {
+            (bj, bi, nbx, by, nax, ay, [inner_order[1], inner_order[0]])
+        }
+    };
+
     let feature = QuadFeature { ax, ay, bx, by };
 
     let key = quantize(&feature, bin_size);
@@ -163,12 +183,19 @@ pub fn quantize(feature: &QuadFeature, bin_size: f64) -> HashKey {
 }
 
 /// neighbouring hash keys (including self) for tolerance lookup.
+/// Returns the exact key first, then neighbours (self + neighbours).
 pub fn neighbor_keys(key: &HashKey, radius: i16) -> Vec<HashKey> {
     let mut keys = Vec::with_capacity(((2 * radius + 1) as usize).pow(4));
+    // Self key first — ensures the exact-match bucket is always visited
+    // before the per-quad candidate cap kicks in.
+    keys.push(*key);
     for dax in -radius..=radius {
         for day in -radius..=radius {
             for dbx in -radius..=radius {
                 for dby in -radius..=radius {
+                    if dax == 0 && day == 0 && dbx == 0 && dby == 0 {
+                        continue;
+                    }
                     let k = HashKey {
                         ax: key.ax.saturating_add(dax),
                         ay: key.ay.saturating_add(day),

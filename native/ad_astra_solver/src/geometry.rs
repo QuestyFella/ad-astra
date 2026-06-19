@@ -238,6 +238,142 @@ impl Affine2D {
     }
 }
 
+/// A 2D transform with a radial quadratic term to model gnomonic
+/// projection distortion:
+///   `xi  = a*px + b*py + c  + d*((px-cx)² + (py-cy)²)`
+///   `eta = e*px + f*py + g  + h*((px-cx)² + (py-cy)²)`
+///
+/// The radial term `((px-cx)² + (py-cy)²)` is centered at `(cx, cy)`
+/// (typically the pixel centroid of the source stars) to keep the
+/// quadratic basis well-conditioned.  This captures the dominant
+/// third-order distortion of the tangent-plane projection, which a
+/// pure affine cannot model.  At least 4 non-degenerate point
+/// correspondences are required (8 parameters, 2 per point).
+#[derive(Clone, Copy, Debug)]
+pub struct RadialQuad2D {
+    pub cx: f64, pub cy: f64,
+    pub a: f64, pub b: f64, pub c: f64, pub d: f64,
+    pub e: f64, pub f: f64, pub g: f64, pub h: f64,
+}
+
+impl RadialQuad2D {
+    /// Fit from `src` → `dst` using least squares centered at `(cx, cy)`.
+    /// Requires ≥ 4 points.
+    pub fn fit(
+        src: &[(f64, f64)],
+        dst: &[(f64, f64)],
+        cx: f64, cy: f64,
+    ) -> Option<RadialQuad2D> {
+        let n = src.len();
+        if n < 4 || dst.len() < n {
+            return None;
+        }
+
+        // Normal equations for [a, b, c, d] (xi) and [e, f, g, h] (eta).
+        // Design row per point: [px, py, 1, r²] where r² = (px-cx)² + (py-cy)².
+        let mut nm = [[0.0_f64; 4]; 4];
+        let mut rhs_x = [0.0_f64; 4];
+        let mut rhs_y = [0.0_f64; 4];
+
+        for i in 0..n {
+            let (px, py) = src[i];
+            let (dx, dy) = dst[i];
+            let r2 = (px - cx).powi(2) + (py - cy).powi(2);
+            let row = [px, py, 1.0, r2];
+            for j in 0..4 {
+                for k in 0..4 {
+                    nm[j][k] += row[j] * row[k];
+                }
+                rhs_x[j] += row[j] * dx;
+                rhs_y[j] += row[j] * dy;
+            }
+        }
+
+        let (sx, sy) = solve_4x4(&nm, &rhs_x, &rhs_y)?;
+        Some(RadialQuad2D {
+            cx, cy,
+            a: sx[0], b: sx[1], c: sx[2], d: sx[3],
+            e: sy[0], f: sy[1], g: sy[2], h: sy[3],
+        })
+    }
+
+    /// Apply the transform to a point.
+    pub fn apply(&self, px: f64, py: f64) -> (f64, f64) {
+        let r2 = (px - self.cx).powi(2) + (py - self.cy).powi(2);
+        (
+            self.a * px + self.b * py + self.c + self.d * r2,
+            self.e * px + self.f * py + self.g + self.h * r2,
+        )
+    }
+
+    /// Extract the linear (affine) part for scale/rotation queries.
+    pub fn affine_part(&self) -> Affine2D {
+        Affine2D {
+            a: self.a, b: self.b, tx: self.c,
+            c: self.e, d: self.f, ty: self.g,
+        }
+    }
+}
+
+/// Solve two 4×4 linear systems sharing the same matrix via Gaussian
+/// elimination with partial pivoting.
+fn solve_4x4(m: &[[f64; 4]; 4], x: &[f64; 4], y: &[f64; 4]) -> Option<([f64; 4], [f64; 4])> {
+    let mut a = [[0.0_f64; 5]; 4]; // augmented matrix [m | x], solved twice
+    let mut a_y = [[0.0_f64; 5]; 4];
+
+    for i in 0..4 {
+        for j in 0..4 {
+            a[i][j] = m[i][j];
+            a_y[i][j] = m[i][j];
+        }
+        a[i][4] = x[i];
+        a_y[i][4] = y[i];
+    }
+
+    // Forward elimination with partial pivoting.
+    for col in 0..4 {
+        let mut pivot = col;
+        for r in (col + 1)..4 {
+            if a[r][col].abs() > a[pivot][col].abs() {
+                pivot = r;
+            }
+        }
+        if a[pivot][col].abs() < 1e-18 {
+            return None;
+        }
+        if pivot != col {
+            a.swap(pivot, col);
+            a_y.swap(pivot, col);
+        }
+        let piv = a[col][col];
+        let piv_y = a_y[col][col];
+        for r in (col + 1)..4 {
+            let factor = a[r][col] / piv;
+            let factor_y = a_y[r][col] / piv_y;
+            for c in col..5 {
+                a[r][c] -= factor * a[col][c];
+                a_y[r][c] -= factor_y * a_y[col][c];
+            }
+        }
+    }
+
+    // Back substitution.
+    let mut sx = [0.0_f64; 4];
+    let mut sy = [0.0_f64; 4];
+    for i in (0..4).rev() {
+        let mut sum_x = a[i][4];
+        let mut sum_y = a_y[i][4];
+        for j in (i + 1)..4 {
+            sum_x -= a[i][j] * sx[j];
+            sum_y -= a_y[i][j] * sy[j];
+        }
+        sx[i] = sum_x / a[i][i];
+        sy[i] = sum_y / a_y[i][i];
+    }
+
+    Some((sx, sy))
+}
+
 /// Solve two 3×3 linear systems sharing the same matrix.
 ///
 /// Returns `(solution_x, solution_y)` or `None` if the matrix is singular.

@@ -2,7 +2,7 @@
 
 Offline plate-solving engine that runs on mobile devices using preprocessed
 astronomical catalogs. Takes a sky image and returns the celestial coordinates
-(RA, Dec) and field-of-view of the imaged region — no network required.
+(RA, Dec) and field-of-view of the imaged region, completely offline.
 
 ## Project structure
 

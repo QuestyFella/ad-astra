@@ -13,7 +13,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use crate::db;
-use crate::geometry::{Affine2D, TangentPlane, Vec3};
+use crate::geometry::{Affine2D, RadialQuad2D, TangentPlane, Vec3};
 use crate::hash::{generate_image_quads, compute_quad_hash, dist_matrix_3d, HashIndex, ImageQuad};
 use crate::types::{DetectedStar, ImageSource, MatchedStarInfo, SolveResult, SolveSourcesRequest};
 
@@ -31,17 +31,21 @@ const HASH_NEIGHBOR_RADIUS: i16 = 1;
 const MAX_CANDIDATES_PER_QUAD: usize = 50;
 
 /// RMS matching threshold (arcseconds) for a star to count as "verified".
+///
+/// With ~8.8k catalog stars over the full sky, the expected number of
+/// chance matches at this radius is well below 1 per solve.  The
+/// `MIN_MATCHED_STARS` gate is what rejects false-positive solutions.
 const VERIFY_MATCH_RADIUS_ARCSEC: f64 = 60.0;
+
+/// Minimum matched stars for a candidate to be accepted as a solution.
+/// Rejects chance coincidences that pass the radius threshold above.
+const MIN_MATCHED_STARS: u32 = 6;
 
 /// An image–catalog pattern correspondence awaiting verification.
 struct Candidate {
     image_quad: ImageQuad,
-    /// Tangent-plane coordinates of the 4 catalog stars (re-used for all
-    /// permutation attempts).
-    cat_tangent: [(f64, f64); 4],
-    /// Catalog star RA/Dec for each of the 4 pattern stars.
-    cat_radec: [(f64, f64); 4],
-    /// Catalog star unit vectors for each of the 4 pattern stars.
+    /// Catalog star unit vectors for each of the 4 pattern stars (in
+    /// canonical hash order [baseline_A, baseline_B, inner_0, inner_1]).
     cat_vecs: [Vec3; 4],
     /// Tangent plane used for the catalog stars.
     tangent_plane: TangentPlane,
@@ -51,7 +55,7 @@ struct Candidate {
 struct VerifiedSolution {
     matched_stars: u32,
     rms_arcsec: f64,
-    affine: Affine2D,
+    transform: RadialQuad2D,
     tangent_plane: TangentPlane,
     matched: Vec<MatchedStarInfo>,
 }
@@ -154,8 +158,15 @@ pub fn solve_sources(request: &SolveSourcesRequest) -> SolveResult {
     // ── 5. Verify candidates ───────────────────────────────────────
     let best = verify_candidates(&candidates, &request.sources, &db);
 
+    match &best {
+        Some(sol) => log.push(format!(
+            "Best verified solution: {} matched stars, rms={:.1} arcsec",
+            sol.matched_stars, sol.rms_arcsec
+        )),
+        None => log.push("No candidates verified successfully.".to_string()),
+    }
+
     if best.is_none() {
-        log.push("No candidates verified successfully.".to_string());
         let elapsed = elapsed_ms(&start);
         let mut result = SolveResult::failure(log);
         result.database_id = Some(db_id);
@@ -168,21 +179,22 @@ pub fn solve_sources(request: &SolveSourcesRequest) -> SolveResult {
 
     // ── 6. Compute final plate solution ────────────────────────────
     let (ra_deg, dec_deg) = image_center_to_radec(
-        &solution.affine,
+        &solution.transform,
         &solution.tangent_plane,
         request.image_width_px,
         request.image_height_px,
     );
 
-    // The affine transform maps image pixels to tangent-plane coordinates
-    // (in radians).  scale() returns the norm of the column vector (a, c),
+    // The transform maps image pixels to tangent-plane coordinates
+    // (in radians).  scale() returns the norm of the column vector (a, e),
     // which is the average pixel scale in radians/pixel.
-    let pixel_scale_arcsec = solution.affine.scale().to_degrees() * 3600.0;
+    let affine_part = solution.transform.affine_part();
+    let pixel_scale_arcsec = affine_part.scale().to_degrees() * 3600.0;
 
     let fov_x_deg = pixel_scale_arcsec * request.image_width_px as f64 / 3600.0;
     let fov_y_deg = pixel_scale_arcsec * request.image_height_px as f64 / 3600.0;
 
-    let roll_deg = solution.affine.rotation_deg();
+    let roll_deg = affine_part.rotation_deg();
 
     // Confidence: based on matched star count and RMS error.
     let confidence: f32 = if solution.matched_stars >= 8
@@ -237,16 +249,6 @@ fn find_candidates(
         .map(|s| Vec3::new(s.x_unit as f64, s.y_unit as f64, s.z_unit as f64))
         .collect();
 
-    let cat_star_radecs: Vec<(f64, f64)> = db
-        .stars
-        .iter()
-        .map(|s| {
-            let ra = (s.ra_rad as f64).to_degrees().rem_euclid(360.0);
-            let dec = (s.dec_rad as f64).to_degrees();
-            (ra, dec)
-        })
-        .collect();
-
     for img_quad in image_quads {
         let hits = hash_index.get_with_neighbors(&img_quad.hash, HASH_NEIGHBOR_RADIUS);
         let mut count = 0;
@@ -268,14 +270,8 @@ fn find_candidates(
                 cat_star_vecs[star_idx[2] as usize],
                 cat_star_vecs[star_idx[3] as usize],
             ];
-            let cat_radecs = [
-                cat_star_radecs[star_idx[0] as usize],
-                cat_star_radecs[star_idx[1] as usize],
-                cat_star_radecs[star_idx[2] as usize],
-                cat_star_radecs[star_idx[3] as usize],
-            ];
 
-            // Re-compute the catalog quad hash to get the ordering.
+            // Re-compute the catalog quad hash to get the canonical ordering.
             let dmat = dist_matrix_3d(&cat_vecs);
             let cat_hash = match compute_quad_hash(&dmat, hash_index.bin_size) {
                 Some(h) => h,
@@ -286,38 +282,7 @@ fn find_candidates(
             let center = centroid(&cat_vecs);
             let tangent_plane = TangentPlane::at(center);
 
-            let mut cat_tangent = [(0.0, 0.0); 4];
-            let mut valid = true;
-            for i in 0..4 {
-                match tangent_plane.project(cat_vecs[i]) {
-                    Some((xi, eta)) => cat_tangent[i] = (xi, eta),
-                    None => {
-                        valid = false;
-                        break;
-                    }
-                }
-            }
-            if !valid {
-                continue;
-            }
-
-            // Get the catalog star RA/Dec for the reordered stars.
-            let cat_reordered_radecs = [
-                cat_radecs[cat_hash.order[0]],
-                cat_radecs[cat_hash.order[1]],
-                cat_radecs[cat_hash.order[2]],
-                cat_radecs[cat_hash.order[3]],
-            ];
-
-            // Reuse `cat_tangent` but reorder it to match the hash order.
-            let cat_reordered_tangent = [
-                cat_tangent[cat_hash.order[0]],
-                cat_tangent[cat_hash.order[1]],
-                cat_tangent[cat_hash.order[2]],
-                cat_tangent[cat_hash.order[3]],
-            ];
-
-            // Also get catalog vectors in the reordered form.
+            // Reorder catalog vectors to match the hash order.
             let cat_reordered_vecs = [
                 cat_vecs[cat_hash.order[0]],
                 cat_vecs[cat_hash.order[1]],
@@ -332,8 +297,6 @@ fn find_candidates(
                     hash: img_quad.hash,
                     feature: img_quad.feature,
                 },
-                cat_tangent: cat_reordered_tangent,
-                cat_radec: cat_reordered_radecs,
                 cat_vecs: cat_reordered_vecs,
                 tangent_plane,
             });
@@ -353,27 +316,25 @@ fn verify_candidates(
 ) -> Option<VerifiedSolution> {
     let mut best: Option<VerifiedSolution> = None;
 
-    // Project ALL catalog stars to a global tangent plane centered at field
-    // center.  We use the singular star_table directly for speed.
     // For each candidate, we use its own tangent plane (centered at the
     // field centroid), so projection is correct for that region.
 
     for candidate in candidates {
         for &swap_baseline in &[false, true] {
             for &swap_inner in &[false, true] {
-                let solution =
-                    verify_single(candidate, sources, db, swap_baseline, swap_inner);
-                if let Some(sol) = solution {
-                    let is_better = match &best {
-                        None => true,
-                        Some(existing) => {
-                            sol.matched_stars > existing.matched_stars
-                                || (sol.matched_stars == existing.matched_stars
-                                    && sol.rms_arcsec < existing.rms_arcsec)
+                for &reflect_y in &[false, true] {
+                    if let Some(sol) = verify_single(candidate, sources, db, swap_baseline, swap_inner, reflect_y) {
+                        let is_better = match &best {
+                            None => true,
+                            Some(existing) => {
+                                sol.matched_stars > existing.matched_stars
+                                    || (sol.matched_stars == existing.matched_stars
+                                        && sol.rms_arcsec < existing.rms_arcsec)
+                            }
+                        };
+                        if is_better {
+                            best = Some(sol);
                         }
-                    };
-                    if is_better {
-                        best = Some(sol);
                     }
                 }
             }
@@ -387,97 +348,203 @@ fn verify_candidates(
 ///
 /// `swap_baseline`: if true, swap A ↔ B in the catalog.
 /// `swap_inner`: if true, swap inner[0] ↔ inner[1] in the catalog.
+/// `reflect_y`: if true, flip the eta coordinate of catalog points (handles
+///   the mirror-image ambiguity from the unsigned |y| in the hash).
 fn verify_single(
     candidate: &Candidate,
     sources: &[ImageSource],
     db: &db::AdbDatabase,
     swap_baseline: bool,
     swap_inner: bool,
+    reflect_y: bool,
 ) -> Option<VerifiedSolution> {
     // Image points: [baseline_A, baseline_B, inner_0, inner_1]
     let img_pts = candidate.image_quad.points;
 
-    // Catalog tangent points (already reordered [A, B, C, D]):
-    // Apply swaps to test reflection/rotation.
-    let mut cat_pts = candidate.cat_tangent;
-    let mut cat_radecs = candidate.cat_radec;
+    // Catalog vectors (already reordered [A, B, C, D] by find_candidates).
+    // Apply the same swaps here to test all correspondence permutations.
     let mut cat_vecs = candidate.cat_vecs;
+    if swap_baseline { cat_vecs.swap(0, 1); }
+    if swap_inner { cat_vecs.swap(2, 3); }
 
-    if swap_baseline {
-        cat_pts.swap(0, 1);
-        cat_radecs.swap(0, 1);
-        cat_vecs.swap(0, 1);
-    }
-    if swap_inner {
-        cat_pts.swap(2, 3);
-        cat_radecs.swap(2, 3);
-        cat_vecs.swap(2, 3);
-    }
-
-    // Fit affine: image (x, y) → tangent (xi, eta).
-    let src = [img_pts[0], img_pts[1], img_pts[2], img_pts[3]];
-    let dst = [cat_pts[0], cat_pts[1], cat_pts[2], cat_pts[3]];
-    let affine = Affine2D::fit(&src, &dst)?;
-
-    // Quick residual check on the 4 matched points.
+    // ── Phase 1: initial 4-point fit on the candidate's tangent plane ──
+    // (centered at the quad centroid).  This gives an approximate affine
+    // that we use to estimate the field center.
+    let mut cat_pts_init = [(0.0, 0.0); 4];
     for i in 0..4 {
-        let (xi_pred, eta_pred) = affine.apply(src[i].0, src[i].1);
-        let dx = xi_pred - dst[i].0;
-        let dy = eta_pred - dst[i].1;
-        let residual = (dx * dx + dy * dy).sqrt();
-        // Reject if a matched point is way off.
-        let threshold_rad = VERIFY_MATCH_RADIUS_ARCSEC / 3600.0 * std::f64::consts::PI / 180.0;
-        if residual > threshold_rad * 2.0 {
+        cat_pts_init[i] = candidate.tangent_plane.project(cat_vecs[i])?;
+    }
+    if reflect_y {
+        for p in &mut cat_pts_init { p.1 = -p.1; }
+    }
+    let src = [img_pts[0], img_pts[1], img_pts[2], img_pts[3]];
+    let dst_init = [cat_pts_init[0], cat_pts_init[1], cat_pts_init[2], cat_pts_init[3]];
+    let affine_init = Affine2D::fit(&src, &dst_init)?;
+
+    // Quick reject: if the 4-point fit is terrible, skip.
+    let loose_threshold_rad = 0.01;
+    for i in 0..4 {
+        let (xi, eta) = affine_init.apply(src[i].0, src[i].1);
+        let dx = xi - dst_init[i].0;
+        let dy = eta - dst_init[i].1;
+        if (dx * dx + dy * dy).sqrt() > loose_threshold_rad {
             return None;
         }
     }
 
-    // Transform all detected sources to tangent plane.
-    let mut img_tangent: Vec<(f64, f64)> = Vec::with_capacity(sources.len());
-    for s in sources {
-        let (xi, eta) = affine.apply(s.x_px, s.y_px);
-        img_tangent.push((xi, eta));
-    }
+    // ── Phase 2: re-project to a field-centered tangent plane ──
+    // Estimate the field center by applying the initial affine to the
+    // centroid of the image sources.  Re-projecting catalog stars to a
+    // tangent plane at this point minimises projection distortion, which
+    // is the dominant source of error for wide fields (>10°).
+    let (cx, cy) = sources.iter().fold((0.0_f64, 0.0_f64), |(ax, ay), s| {
+        (ax + s.x_px, ay + s.y_px)
+    });
+    let n = sources.len() as f64;
+    let (cx, cy) = (cx / n, cy / n);
 
-    // Project all catalog stars to this tangent plane.
-    let match_threshold_rad =
+    let (fc_xi, fc_eta) = affine_init.apply(cx, cy);
+    let field_center = candidate.tangent_plane.unproject(fc_xi, fc_eta);
+    let field_tp = TangentPlane::at(field_center);
+
+    // Re-project the 4 catalog stars to the field-centered tangent plane.
+    let mut cat_pts = [(0.0, 0.0); 4];
+    for i in 0..4 {
+        cat_pts[i] = field_tp.project(cat_vecs[i])?;
+    }
+    if reflect_y {
+        for p in &mut cat_pts { p.1 = -p.1; }
+    }
+    let dst = [cat_pts[0], cat_pts[1], cat_pts[2], cat_pts[3]];
+    let affine = Affine2D::fit(&src, &dst)?;
+
+    // Project ALL catalog stars to the field-centered tangent plane.
+    // If reflect_y is set, flip eta for ALL stars (not just the 4 pattern
+    // stars) — the entire coordinate system is mirrored.
+    let cat_tangent_all: Vec<(f64, f64)> = db
+        .stars
+        .iter()
+        .map(|s| {
+            let v = Vec3::new(s.x_unit as f64, s.y_unit as f64, s.z_unit as f64);
+            match field_tp.project(v) {
+                Some((xi, eta)) => {
+                    if reflect_y { (xi, -eta) } else { (xi, eta) }
+                }
+                None => (f64::MAX, 0.0),
+            }
+        })
+        .collect();
+
+    // ── Phase 3: multi-scale matching + iterative refit ──
+    // Start with the 4-point affine, match at a wide radius to catch
+    // enough stars, then refit with a radial-quadratic model that
+    // absorbs gnomonic distortion.  Narrow the radius each pass.
+    let final_threshold_rad =
         VERIFY_MATCH_RADIUS_ARCSEC / 3600.0 * std::f64::consts::PI / 180.0;
-    let match_threshold_sq = match_threshold_rad * match_threshold_rad;
+    let iter_radii_arcsec: [f64; 5] = [900.0, 400.0, 200.0, 100.0, 60.0];
 
     let mut matched: Vec<MatchedStarInfo> = Vec::new();
-    let mut rms_sum_sq = 0.0_f64;
+    #[allow(unused_assignments)]
+    let mut rms_sum_sq = 0.0;
+    let mut refine_source_pts: Vec<(f64, f64)> = Vec::new();
+    let mut refine_catalog_pts: Vec<(f64, f64)> = Vec::new();
 
-    // For each transformed image star, find the closest catalog star.
-    for (i, &(xi, eta)) in img_tangent.iter().enumerate() {
-        let mut best_dist_sq = f64::MAX;
-        let mut best_star: Option<usize> = None;
+    // The transform starts as affine (from the 4-point fit) and is
+    // upgraded to radial-quadratic once we have ≥ 4 matched points.
+    let mut quad: Option<RadialQuad2D> = None;
 
-        // Brute-force search through all catalog stars.
-        // (Could be accelerated with a spatial index.)
-        for (j, star) in db.stars.iter().enumerate() {
-            let cat_vec = Vec3::new(star.x_unit as f64, star.y_unit as f64, star.z_unit as f64);
-            if let Some((cat_xi, cat_eta)) = candidate.tangent_plane.project(cat_vec) {
+    for _iter in 0..iter_radii_arcsec.len() {
+        let iter_threshold_rad =
+            iter_radii_arcsec[_iter] / 3600.0 * std::f64::consts::PI / 180.0;
+        let iter_threshold_sq = iter_threshold_rad * iter_threshold_rad;
+
+        matched.clear();
+        refine_source_pts.clear();
+        refine_catalog_pts.clear();
+
+        for s in sources.iter() {
+            let (xi, eta) = match quad {
+                Some(q) => q.apply(s.x_px, s.y_px),
+                None => affine.apply(s.x_px, s.y_px),
+            };
+
+            let mut best_dist_sq = f64::MAX;
+            let mut best_j: usize = 0;
+            for (j, &(cat_xi, cat_eta)) in cat_tangent_all.iter().enumerate() {
+                if cat_xi == f64::MAX { continue; }
                 let dx = xi - cat_xi;
                 let dy = eta - cat_eta;
                 let dist_sq = dx * dx + dy * dy;
                 if dist_sq < best_dist_sq {
                     best_dist_sq = dist_sq;
-                    best_star = Some(j);
+                    best_j = j;
                 }
+            }
+
+            if best_dist_sq < iter_threshold_sq {
+                let star = &db.stars[best_j];
+                let (ra, dec) = (
+                    (star.ra_rad as f64).to_degrees().rem_euclid(360.0),
+                    (star.dec_rad as f64).to_degrees(),
+                );
+                refine_source_pts.push((s.x_px, s.y_px));
+                refine_catalog_pts.push(cat_tangent_all[best_j]);
+                matched.push(MatchedStarInfo {
+                    image_x: s.x_px,
+                    image_y: s.y_px,
+                    catalog_id: star.catalog_id,
+                    ra_deg: ra,
+                    dec_deg: dec,
+                });
             }
         }
 
-        if best_dist_sq < match_threshold_sq {
-            let star_idx = best_star.unwrap();
-            let star = &db.stars[star_idx];
+        // Refit with radial-quadratic (handles distortion) when we
+        // have ≥ 4 matched points.
+        if refine_source_pts.len() < 4 { break; }
+        if let Some(new_quad) = RadialQuad2D::fit(&refine_source_pts, &refine_catalog_pts, cx, cy) {
+            let prev_a = quad.map(|q| q.a).unwrap_or(affine.a);
+            let prev_d = quad.map(|q| q.f).unwrap_or(affine.d);
+            let da = new_quad.a - prev_a;
+            let dd = new_quad.f - prev_d;
+            if (da * da + dd * dd).sqrt() < 1e-12 { break; }
+            quad = Some(new_quad);
+        } else {
+            break;
+        }
+    }
+
+    // Final re-match at the tightest radius.
+    let final_threshold_sq = final_threshold_rad * final_threshold_rad;
+    matched.clear();
+    rms_sum_sq = 0.0;
+    for s in sources.iter() {
+        let (xi, eta) = match quad {
+            Some(q) => q.apply(s.x_px, s.y_px),
+            None => affine.apply(s.x_px, s.y_px),
+        };
+        let mut best_dist_sq = f64::MAX;
+        let mut best_j: usize = 0;
+        for (j, &(cat_xi, cat_eta)) in cat_tangent_all.iter().enumerate() {
+            if cat_xi == f64::MAX { continue; }
+            let dx = xi - cat_xi;
+            let dy = eta - cat_eta;
+            let dist_sq = dx * dx + dy * dy;
+            if dist_sq < best_dist_sq {
+                best_dist_sq = dist_sq;
+                best_j = j;
+            }
+        }
+        if best_dist_sq < final_threshold_sq {
+            let star = &db.stars[best_j];
             rms_sum_sq += best_dist_sq;
             let (ra, dec) = (
                 (star.ra_rad as f64).to_degrees().rem_euclid(360.0),
                 (star.dec_rad as f64).to_degrees(),
             );
             matched.push(MatchedStarInfo {
-                image_x: sources[i].x_px,
-                image_y: sources[i].y_px,
+                image_x: s.x_px,
+                image_y: s.y_px,
                 catalog_id: star.catalog_id,
                 ra_deg: ra,
                 dec_deg: dec,
@@ -485,7 +552,7 @@ fn verify_single(
         }
     }
 
-    if matched.is_empty() {
+    if (matched.len() as u32) < MIN_MATCHED_STARS {
         return None;
     }
 
@@ -493,29 +560,34 @@ fn verify_single(
     let rms_rad = (rms_sum_sq / n).sqrt();
     let rms_arcsec = rms_rad.to_degrees() * 3600.0;
 
+    // Use the quad transform if available, otherwise wrap the affine.
+    let transform = quad.unwrap_or_else(|| {
+        RadialQuad2D {
+            cx, cy,
+            a: affine.a, b: affine.b, c: affine.tx, d: 0.0,
+            e: affine.c, f: affine.d, g: affine.ty, h: 0.0,
+        }
+    });
+
     Some(VerifiedSolution {
         matched_stars: matched.len() as u32,
         rms_arcsec,
-        affine,
-        tangent_plane: TangentPlane {
-            center: candidate.tangent_plane.center,
-            e1: candidate.tangent_plane.e1,
-            e2: candidate.tangent_plane.e2,
-        },
+        transform,
+        tangent_plane: field_tp,
         matched,
     })
 }
 
 /// Compute the RA/Dec of the image center.
 fn image_center_to_radec(
-    affine: &Affine2D,
+    transform: &RadialQuad2D,
     tp: &TangentPlane,
     width_px: u32,
     height_px: u32,
 ) -> (f64, f64) {
     let center_x = width_px as f64 / 2.0;
     let center_y = height_px as f64 / 2.0;
-    let (xi, eta) = affine.apply(center_x, center_y);
+    let (xi, eta) = transform.apply(center_x, center_y);
     let vec = tp.unproject(xi, eta);
     crate::geometry::unit_to_radec(vec)
 }

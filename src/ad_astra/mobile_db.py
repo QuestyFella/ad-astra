@@ -42,7 +42,19 @@ from pathlib import Path
 import numpy as np
 
 ADB_MAGIC = b"ADB\x00"
-HEADER_FMT = "<4sIIIffffff16s"
+# Header layout (64 bytes, little-endian):
+#   magic[4]          4s
+#   version           I    (u32)
+#   n_stars           I    (u32)
+#   n_patterns        I    (u32)
+#   min_fov_deg       f    (f32)
+#   max_fov_deg       f    (f32)
+#   max_mag           f    (f32)
+#   epoch             I    (u32)
+#   pattern_size      I    (u32)
+#   pattern_bins      I    (u32)
+#   reserved          24s  (zeros)
+HEADER_FMT = "<4sIIIfffIII24s"
 HEADER_SIZE = struct.calcsize(HEADER_FMT)
 STAR_FMT = "<Iffffff"
 STAR_SIZE = struct.calcsize(STAR_FMT)
@@ -90,7 +102,7 @@ def write_adb(
             int(properties.get("epoch_equinox", 2000)),
             int(properties.get("pattern_size", 4)),
             int(properties.get("pattern_bins", 50)),
-            b"\x00" * 16,
+            b"\x00" * 24,
         )
         fh.write(header)
 
