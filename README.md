@@ -6,12 +6,17 @@ completely offline, no network required.
 
 ## How it works
 
-1. **Catalog preprocessing** (Python) — filters Gaia/Hipparcos/Tycho-2
-   stars by magnitude and generates geometric quads (4-star patterns)
-   hashed by invariant ratios.
-2. **Database build** (Python) — packs stars + patterns into a compact
-   binary `.adb` file designed for zero-copy `mmap` access from Rust.
-3. **Plate solving** (Rust) — reads the `.adb` database, hashes quads
+Uses star catalog databases from [ESA's Tetra3](https://github.com/esa/tetra3)
+plate-solving library as input. Ad Astra converts these NumPy `.npz`
+databases into a compact binary format (`.adb`) and provides its own
+lightweight Rust solver — no NumPy, SciPy, or Python runtime needed at
+solve time. A Tetra3 adapter is also included as a reference solver
+backend for development and testing.
+
+1. **Database conversion** (Python) — converts Tetra3 `.npz` databases
+   (Hipparcos/Tycho-2 stars, geometric quad patterns) into the fixed-layout
+   `.adb` binary format designed for zero-copy `mmap` access from Rust.
+2. **Plate solving** (Rust) — reads the `.adb` database, hashes quads
    from image sources, looks up candidates by hash, then verifies via
    multi-scale geometric matching with radial-distortion correction.
 
