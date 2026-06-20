@@ -89,8 +89,8 @@ export function ResultScreen({ navigation, route }: ResultScreenProps) {
           )}
           {showOverlay && success && (
             <StarMarkerLayer
-              imageWidth={1200}
-              imageHeight={1600}
+              imageWidth={result.imageWidth}
+              imageHeight={result.imageHeight}
               displayWidth={SCREEN_WIDTH - 32}
               displayHeight={240}
               detectedStars={result.detectedStars}

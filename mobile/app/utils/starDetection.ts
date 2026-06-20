@@ -110,11 +110,12 @@ export function detectStarsFromPixels(
 
 /**
  * Detect stars in an image URI — loads image, then delegates to detectStarsFromPixels.
+ * Returns detected stars and the actual image dimensions after resize.
  */
 export async function detectStars(
   imageUri: string,
   options: StarDetectionOptions = {}
-): Promise<DetectedStar[]> {
+): Promise<{ stars: DetectedStar[]; imageWidth: number; imageHeight: number }> {
   const opts = { ...DEFAULT_OPTIONS, ...options };
 
   const { base64, width, height } = await loadImagePixels(imageUri, opts.maxDimension);
@@ -123,7 +124,8 @@ export async function detectStars(
   }
 
   const pixels = new Uint8ClampedArray(Buffer.from(base64, "base64"));
-  return detectStarsFromPixels(pixels, width, height, options);
+  const stars = detectStarsFromPixels(pixels, width, height, options);
+  return { stars, imageWidth: width, imageHeight: height };
 }
 
 /** Convert RGBA pixel array to grayscale float values. */

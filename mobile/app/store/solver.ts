@@ -70,7 +70,7 @@ export function useSolver() {
 
       // ── 2. Detect stars from image ──
       setCurrentStep('detecting');
-      const detectedStarsRaw = await detectStars(uri, {
+      const { stars: detectedStarsRaw, imageWidth, imageHeight } = await detectStars(uri, {
         maxDimension: 1024,
         thresholdSigma: 4,
         maxStars: 50,
@@ -80,11 +80,6 @@ export function useSolver() {
         setState('cancelled');
         return;
       }
-
-      const imageWidth = 1024; // The size we resized to for detection
-      const imageHeight = Math.round(
-        (1024 * detectedStarsRaw[0]?.y || 1) / (detectedStarsRaw[0]?.x || 1)
-      ) || 1024;
 
       const detectedStars: DetectedStar[] = detectedStarsRaw.map((s) => ({
         x: s.x,
@@ -106,6 +101,8 @@ export function useSolver() {
           solveTimeMs: Date.now() - startTime,
           detectedStars,
           matchedStarPositions: [],
+          imageWidth,
+          imageHeight,
           log: [
             `Detected only ${detectedStars.length} stars`,
             'Need at least 4 stars for solving.',
@@ -130,6 +127,8 @@ export function useSolver() {
           solveTimeMs: Date.now() - startTime,
           detectedStars,
           matchedStarPositions: [],
+          imageWidth,
+          imageHeight,
           log: [
             `Detected ${detectedStars.length} stars`,
             'Star catalog database not loaded.',
@@ -192,6 +191,8 @@ export function useSolver() {
         solveTimeMs: Date.now() - startTime,
         detectedStars,
         matchedStarPositions: matched,
+        imageWidth,
+        imageHeight,
         log: solveResult.log,
       };
 
@@ -212,6 +213,8 @@ export function useSolver() {
         solveTimeMs: Date.now() - startTime,
         detectedStars: [],
         matchedStarPositions: [],
+        imageWidth: 0,
+        imageHeight: 0,
         log: ['Error: ' + (err.message || String(err))],
       });
       setState('solved');

@@ -43,6 +43,8 @@ export interface SolveResult {
   detectedStars: DetectedStar[];
   matchedStarPositions: MatchedStar[];
   solveTimeMs: number;
+  imageWidth: number;
+  imageHeight: number;
   log: string[];
 }
 
