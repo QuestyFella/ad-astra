@@ -61,23 +61,32 @@ struct VerifiedSolution {
 }
 
 /// Entry point: solve from a list of detected image centroids.
+/// Loads the database from the file path specified in the request.
 pub fn solve_sources(request: &SolveSourcesRequest) -> SolveResult {
-    let start = Instant::now();
     let path = Path::new(&request.database_path);
     let db_id = path
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
 
-    let mut log: Vec<String> = Vec::new();
-
-    // ── 1. Load database ──────────────────────────────────────────
     let db = match db::load_database(path) {
         Ok(db) => db,
         Err(e) => {
             return SolveResult::failure(vec![format!("Failed to read database: {}", e)]);
         }
     };
+
+    solve_sources_with_db(request, db, &db_id)
+}
+
+/// Solve using an already-loaded database (useful for WASM / mobile).
+pub fn solve_sources_with_db(
+    request: &SolveSourcesRequest,
+    db: db::AdbDatabase,
+    db_id: &str,
+) -> SolveResult {
+    let start = Instant::now();
+    let mut log: Vec<String> = Vec::new();
 
     log.push(format!(
         "Database: {} stars, {} patterns, FOV {:.1}-{:.1} deg, mag ≤ {:.1}",
@@ -112,7 +121,7 @@ pub fn solve_sources(request: &SolveSourcesRequest) -> SolveResult {
     if request.sources.is_empty() {
         let elapsed = elapsed_ms(&start);
         let mut result = SolveResult::failure(log);
-        result.database_id = Some(db_id);
+        result.database_id = Some(db_id.to_string());
         result.solve_time_ms = elapsed;
         result.detected_stars = detected_stars;
         return result;
@@ -130,7 +139,7 @@ pub fn solve_sources(request: &SolveSourcesRequest) -> SolveResult {
     if image_quads.is_empty() {
         let elapsed = elapsed_ms(&start);
         let mut result = SolveResult::failure(log);
-        result.database_id = Some(db_id);
+        result.database_id = Some(db_id.to_string());
         result.solve_time_ms = elapsed;
         result.detected_stars = detected_stars;
         return result;
@@ -144,7 +153,7 @@ pub fn solve_sources(request: &SolveSourcesRequest) -> SolveResult {
     if candidates.is_empty() {
         let elapsed = elapsed_ms(&start);
         let mut result = SolveResult::failure(log);
-        result.database_id = Some(db_id);
+        result.database_id = Some(db_id.to_string());
         result.solve_time_ms = elapsed;
         result.detected_stars = detected_stars;
         return result;
@@ -169,7 +178,7 @@ pub fn solve_sources(request: &SolveSourcesRequest) -> SolveResult {
     if best.is_none() {
         let elapsed = elapsed_ms(&start);
         let mut result = SolveResult::failure(log);
-        result.database_id = Some(db_id);
+        result.database_id = Some(db_id.to_string());
         result.solve_time_ms = elapsed;
         result.detected_stars = detected_stars;
         return result;
@@ -221,7 +230,7 @@ pub fn solve_sources(request: &SolveSourcesRequest) -> SolveResult {
         matched_stars: solution.matched_stars,
         rms_error_arcsec: Some(solution.rms_arcsec as f32),
         solve_time_ms: elapsed_ms(&start),
-        database_id: Some(db_id),
+        database_id: Some(db_id.to_string()),
         log,
         detected_stars,
         matched_star_positions: solution.matched,

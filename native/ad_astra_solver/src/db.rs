@@ -159,7 +159,55 @@ pub fn read_pattern(path: &Path, index: usize) -> Result<PatternRecord, SolverEr
     Ok(parse_pattern(&buf))
 }
 
-/// Load the entire .adb database into memory.
+/// Load the entire .adb database from bytes in memory.
+pub fn load_database_from_bytes(data: &[u8]) -> Result<AdbDatabase, SolverError> {
+    if data.len() < HEADER_SIZE {
+        return Err(SolverError::Truncated {
+            context: "header".into(),
+        });
+    }
+
+    let header = parse_header(&data[..HEADER_SIZE])?;
+
+    let n_stars = header.n_stars as usize;
+    let n_patterns = header.n_patterns as usize;
+
+    let star_offset = HEADER_SIZE;
+    let star_bytes = n_stars * STAR_SIZE;
+    if data.len() < star_offset + star_bytes {
+        return Err(SolverError::Truncated {
+            context: "star records".into(),
+        });
+    }
+
+    let mut stars = Vec::with_capacity(n_stars);
+    for i in 0..n_stars {
+        let offset = star_offset + i * STAR_SIZE;
+        stars.push(parse_star(&data[offset..offset + STAR_SIZE]));
+    }
+
+    let pattern_offset = star_offset + star_bytes;
+    let pattern_bytes = n_patterns * PATTERN_SIZE;
+    if data.len() < pattern_offset + pattern_bytes {
+        return Err(SolverError::Truncated {
+            context: "pattern records".into(),
+        });
+    }
+
+    let mut patterns = Vec::with_capacity(n_patterns);
+    for i in 0..n_patterns {
+        let offset = pattern_offset + i * PATTERN_SIZE;
+        patterns.push(parse_pattern(&data[offset..offset + PATTERN_SIZE]));
+    }
+
+    Ok(AdbDatabase {
+        header,
+        stars,
+        patterns,
+    })
+}
+
+/// Load the entire .adb database from a file path.
 pub fn load_database(path: &Path) -> Result<AdbDatabase, SolverError> {
     let mut file = File::open(path)?;
 

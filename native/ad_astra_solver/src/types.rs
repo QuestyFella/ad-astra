@@ -1,5 +1,5 @@
 /// Image source (detected star centroid).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ImageSource {
     pub x_px: f64,
     pub y_px: f64,
@@ -7,19 +7,23 @@ pub struct ImageSource {
 }
 
 /// Request to solve from a list of detected centroids.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SolveSourcesRequest {
     pub sources: Vec<ImageSource>,
     pub image_width_px: u32,
     pub image_height_px: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub fov_estimate_deg: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub fov_max_error_deg: Option<f32>,
+    #[serde(default)]
     pub database_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub solve_timeout_ms: Option<f64>,
 }
 
 /// A detected star for overlay display.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DetectedStar {
     pub x_px: f64,
     pub y_px: f64,
@@ -27,7 +31,7 @@ pub struct DetectedStar {
 }
 
 /// A star matched between image and catalog.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MatchedStarInfo {
     pub image_x: f64,
     pub image_y: f64,
@@ -37,7 +41,7 @@ pub struct MatchedStarInfo {
 }
 
 /// Result of a plate solve.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SolveResult {
     pub success: bool,
     pub ra_deg: Option<f64>,
