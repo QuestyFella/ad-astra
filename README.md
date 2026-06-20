@@ -2,11 +2,11 @@
 
 Offline plate-solving engine for mobile devices. Take a photo of the night
 sky and get back celestial coordinates (RA, Dec), field-of-view, and image
-rotation — completely offline, no network required.
+rotation - completely offline, no network required.
 
 Ad Astra converts [ESA's Tetra3](https://github.com/esa/tetra3) star-catalog
 databases into a compact binary format (`.adb`) and ships its own Rust solver.
-No NumPy or Python runtime is needed at solve time — the Rust solver is
+No NumPy or Python runtime is needed at solve time - the Rust solver is
 compiled to WebAssembly and runs entirely inside the Expo / React Native app.
 
 ## How the pipeline works
@@ -32,8 +32,8 @@ The project has three stages that run at different times:
 
 ### 1. Database conversion (Python, build time)
 
-`scripts/build_adb.py` loads a Tetra3 `.npz` database — which contains
-Hipparcos / Tycho-2 stars and geometric quad patterns — and serializes it
+`scripts/build_adb.py` loads a Tetra3 `.npz` database - which contains
+Hipparcos / Tycho-2 stars and geometric quad patterns - and serializes it
 into the fixed-layout `.adb` binary format via `mobile_db.convert_tetra3_to_adb()`.
 
 The `.adb` format (see [`docs/mobile-database-format.md`](docs/mobile-database-format.md))
@@ -66,50 +66,50 @@ solve(db_bytes: Uint8Array, sources_json: string,
 
 The solver pipeline (`native/ad_astra_solver/src/solve.rs`):
 
-1. **Load database** — parse the `.adb` bytes into an `AdbDatabase`
+1. **Load database** - parse the `.adb` bytes into an `AdbDatabase`
    (stars + patterns) in memory.
 
-2. **Build hash index** — iterate every catalog pattern, compute the 3D
+2. **Build hash index** - iterate every catalog pattern, compute the 3D
    chord-distance matrix for the 4 stars, and hash the quad into a
    4-dimensional quantized key (`HashKey { i16 × 4 }`).
-   The hash is **canonical** — invariant to translation, rotation, scale,
-   and point ordering — by:
+   The hash is **canonical** - invariant to translation, rotation, scale,
+   and point ordering - by:
    - picking the longest baseline pair (A, B)
    - projecting the two inner stars onto the baseline using the cosine rule
    - taking `|y|` (unsigned) for rotation invariance
    - enforcing the first inner star's `x ≤ 0.5` for a canonical ordering
 
-3. **Generate image quads** — from the top 25 detected sources
+3. **Generate image quads** - from the top 25 detected sources
    (`MAX_SOURCES_FOR_QUADS`), enumerate all C(n, 4) combinations with a
    minimum baseline of 5 px (`MIN_BASELINE_PX`), and hash each using the
    same canonical scheme.
 
-4. **Find candidates** — for each image-quad hash, look up the hash index
+4. **Find candidates** - for each image-quad hash, look up the hash index
    with a neighbor radius of 1 bin (returns (2r+1)⁴ = 81 neighboring
    buckets), capped at 50 candidates per quad (`MAX_CANDIDATES_PER_QUAD`).
 
-5. **Verify** — for each candidate, test **8 correspondence permutations**
+5. **Verify** - for each candidate, test **8 correspondence permutations**
    (`swap_baseline × swap_inner × reflect_y`) to resolve the sign/label
    ambiguity of the unsigned hash. For each permutation, run a three-phase
    geometric match:
 
-   - **Phase 1 — initial fit**: 4-point affine transform
+   - **Phase 1 - initial fit**: 4-point affine transform
      (`Affine2D::fit`, least-squares via Cramer's rule) on the quad's
      tangent plane. Quick-reject if residual > 0.01 rad.
-   - **Phase 2 — re-center**: estimate field center by applying the affine
+   - **Phase 2 - re-center**: estimate field center by applying the affine
      to the source centroid, build a field-centered `TangentPlane`, and
      re-project all catalog stars to minimise gnomonic distortion
      (dominant error source for wide fields > 10°).
-   - **Phase 3 — multi-scale refit**: iteratively match sources to nearest
+   - **Phase 3 - multi-scale refit**: iteratively match sources to nearest
      catalog star within a shrinking radius (900 → 400 → 200 → 100 → 60
      arcseconds), refitting a `RadialQuad2D` (affine + radial-quadratic
      distortion term) via 4×4 Gaussian elimination with partial pivoting
      at each scale. Converges when the transform stops moving.
 
-6. **Accept solution** — a candidate is accepted when ≥ 6 stars match
+6. **Accept solution** - a candidate is accepted when ≥ 6 stars match
    (`MIN_MATCHED_STARS`) at the 60″ radius.
 
-7. **Compute output** — the image center is unprojected through the fitted
+7. **Compute output** - the image center is unprojected through the fitted
    transform + tangent plane to get RA/Dec. Pixel scale comes from the
    affine column norm; FOV = scale × image dimensions; roll from
    `atan2(c, a)`. Confidence is tiered: 0.95 (≥ 8 stars & RMS < 15″),
@@ -121,17 +121,17 @@ The app has two tabs: **Solve** and **About**.
 
 **Solve flow:**
 
-1. **Capture** — user takes a photo or picks one from the library
+1. **Capture** - user takes a photo or picks one from the library
    (`expo-image-picker`).
-2. **Star detection** (`app/utils/starDetection.ts`) — pure-TypeScript
+2. **Star detection** (`app/utils/starDetection.ts`) - pure-TypeScript
    pipeline: convert to grayscale → box-blur background estimation →
    MAD noise estimate → threshold at `thresholdSigma × noise` → flood-fill
    connected components → flux-weighted centroid. Returns the top 50 stars
    by flux. Images are pre-resized to ≤ 1024 px (`expo-image-manipulator`).
-3. **Solve** (`app/utils/solver.ts`) — sources are JSON-serialized and
+3. **Solve** (`app/utils/solver.ts`) - sources are JSON-serialized and
    passed to the WASM `solve()` function along with the `.adb` database
    bytes and image dimensions. The result is parsed back from JSON.
-4. **Display** (`app/screens/ResultScreen.tsx`) — shows the image with a
+4. **Display** (`app/screens/ResultScreen.tsx`) - shows the image with a
    star overlay (green dots = detected, orange rings = matched), a
    coordinate readout (RA, Dec, FOV, Rotation), and share/new-photo actions.
 
@@ -150,7 +150,7 @@ ad-astra/
     tetra3_adapter.py           #   optional Tetra3 reference solver
     ingest.py / catalog.py      #   catalog parsing / dataclasses
     binary.py                   #   older ASTR format (prototype)
-    features.py / solver.py     #   Python solver prototype (stub — real algo is Rust)
+    features.py / solver.py     #   Python solver prototype (stub - real algo is Rust)
     projection.py / synthetic.py  # gnomonic projection / test-field generation
     coordinates.py / index.py / sources.py / solver_models.py / cli.py
   native/
@@ -230,7 +230,7 @@ python -m http.server 8765     # from project root, serves data/processed/defaul
 
 See [`docs/mobile-database-format.md`](docs/mobile-database-format.md) for
 the full `.adb` binary format specification (64-byte header, star records,
-pattern records — all little-endian, fixed-layout, no compression).
+pattern records - all little-endian, fixed-layout, no compression).
 
 ## Documentation
 
