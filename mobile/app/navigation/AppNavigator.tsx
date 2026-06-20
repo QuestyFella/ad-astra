@@ -7,17 +7,14 @@ import type { ThemeMode } from '../theme/colors';
 import { getTheme } from '../theme/colors';
 import type {
   HomeStackParamList,
-  CatalogStackParamList,
-  SettingsStackParamList,
+  AboutStackParamList,
   TabParamList,
 } from '../types/navigation';
 
 import { HomeScreen } from '../screens/HomeScreen';
-import { ImagePreviewScreen } from '../screens/ImagePreviewScreen';
 import { SolvingScreen } from '../screens/SolvingScreen';
 import { ResultScreen } from '../screens/ResultScreen';
-import { CatalogScreen } from '../screens/CatalogScreen';
-import { SettingsScreen } from '../screens/SettingsScreen';
+import { AboutScreen } from '../screens/AboutScreen';
 
 export const ThemeContext = createContext<{
   theme: ThemeMode;
@@ -30,34 +27,24 @@ export const ThemeContext = createContext<{
 });
 
 const HomeStack = createNativeStackNavigator<HomeStackParamList>();
-const CatalogStack = createNativeStackNavigator<CatalogStackParamList>();
-const SettingsStack = createNativeStackNavigator<SettingsStackParamList>();
+const AboutStack = createNativeStackNavigator<AboutStackParamList>();
 const Tab = createBottomTabNavigator<TabParamList>();
 
 function HomeStackScreen() {
   return (
     <HomeStack.Navigator screenOptions={{ headerShown: false }}>
       <HomeStack.Screen name="HomeMain" component={HomeScreen} />
-      <HomeStack.Screen name="ImagePreview" component={ImagePreviewScreen} />
       <HomeStack.Screen name="Solving" component={SolvingScreen} />
       <HomeStack.Screen name="Result" component={ResultScreen} />
     </HomeStack.Navigator>
   );
 }
 
-function CatalogStackScreen() {
+function AboutStackScreen() {
   return (
-    <CatalogStack.Navigator screenOptions={{ headerShown: false }}>
-      <CatalogStack.Screen name="CatalogMain" component={CatalogScreen} />
-    </CatalogStack.Navigator>
-  );
-}
-
-function SettingsStackScreen() {
-  return (
-    <SettingsStack.Navigator screenOptions={{ headerShown: false }}>
-      <SettingsStack.Screen name="SettingsMain" component={SettingsScreen} />
-    </SettingsStack.Navigator>
+    <AboutStack.Navigator screenOptions={{ headerShown: false }}>
+      <AboutStack.Screen name="AboutMain" component={AboutScreen} />
+    </AboutStack.Navigator>
   );
 }
 
@@ -76,46 +63,35 @@ export function AppNavigator() {
               backgroundColor: t.card,
               borderTopColor: t.cardBorder,
               borderTopWidth: 1,
-              height: 60,
-              paddingBottom: 8,
-              paddingTop: 4,
+              height: 64,
+              paddingBottom: 10,
+              paddingTop: 6,
             },
             tabBarActiveTintColor: t.accent,
             tabBarInactiveTintColor: t.textMuted,
             tabBarLabelStyle: {
-              fontSize: 11,
-              fontFamily: 'Courier',
+              fontSize: 12,
               fontWeight: '600',
             },
           }}
         >
           <Tab.Screen
-            name="HomeTab"
+            name="SolveTab"
             component={HomeStackScreen}
             options={{
               tabBarLabel: 'Solve',
               tabBarIcon: ({ color }) => (
-                <Text style={{ fontSize: 20, color }}>◎</Text>
+                <Text style={{ fontSize: 22, color }}>◎</Text>
               ),
             }}
           />
           <Tab.Screen
-            name="CatalogTab"
-            component={CatalogStackScreen}
+            name="AboutTab"
+            component={AboutStackScreen}
             options={{
-              tabBarLabel: 'Catalogs',
+              tabBarLabel: 'About',
               tabBarIcon: ({ color }) => (
-                <Text style={{ fontSize: 20, color }}>☰</Text>
-              ),
-            }}
-          />
-          <Tab.Screen
-            name="SettingsTab"
-            component={SettingsStackScreen}
-            options={{
-              tabBarLabel: 'Settings',
-              tabBarIcon: ({ color }) => (
-                <Text style={{ fontSize: 20, color }}>⚙</Text>
+                <Text style={{ fontSize: 20, color }}>ⓘ</Text>
               ),
             }}
           />

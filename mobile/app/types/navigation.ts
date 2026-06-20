@@ -4,33 +4,22 @@ import type { CompositeScreenProps, NavigatorScreenParams } from '@react-navigat
 
 export type HomeStackParamList = {
   HomeMain: undefined;
-  ImagePreview: { imageUri: string };
   Solving: { imageUri: string };
   Result: { imageUri: string };
 };
 
-export type CatalogStackParamList = {
-  CatalogMain: undefined;
-};
-
-export type SettingsStackParamList = {
-  SettingsMain: undefined;
+export type AboutStackParamList = {
+  AboutMain: undefined;
 };
 
 export type TabParamList = {
-  HomeTab: NavigatorScreenParams<HomeStackParamList>;
-  CatalogTab: NavigatorScreenParams<CatalogStackParamList>;
-  SettingsTab: NavigatorScreenParams<SettingsStackParamList>;
+  SolveTab: NavigatorScreenParams<HomeStackParamList>;
+  AboutTab: NavigatorScreenParams<AboutStackParamList>;
 };
 
 export type HomeScreenProps = CompositeScreenProps<
   NativeStackScreenProps<HomeStackParamList, 'HomeMain'>,
   BottomTabScreenProps<TabParamList>
->;
-
-export type ImagePreviewScreenProps = NativeStackScreenProps<
-  HomeStackParamList,
-  'ImagePreview'
 >;
 
 export type SolvingScreenProps = NativeStackScreenProps<
@@ -43,12 +32,7 @@ export type ResultScreenProps = NativeStackScreenProps<
   'Result'
 >;
 
-export type CatalogScreenProps = CompositeScreenProps<
-  NativeStackScreenProps<CatalogStackParamList, 'CatalogMain'>,
-  BottomTabScreenProps<TabParamList>
->;
-
-export type SettingsScreenProps = CompositeScreenProps<
-  NativeStackScreenProps<SettingsStackParamList, 'SettingsMain'>,
+export type AboutScreenProps = CompositeScreenProps<
+  NativeStackScreenProps<AboutStackParamList, 'AboutMain'>,
   BottomTabScreenProps<TabParamList>
 >;

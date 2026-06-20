@@ -3,9 +3,9 @@ import {
   View,
   Text,
   StyleSheet,
-  ScrollView,
   TouchableOpacity,
   Alert,
+  Dimensions,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -13,169 +13,155 @@ import { StatusBar } from 'expo-status-bar';
 import type { HomeScreenProps } from '../types/navigation';
 import { ThemeContext } from '../navigation/AppNavigator';
 import { getTheme } from '../theme/colors';
-import { StatusCard } from '../components/StatusCard';
-import { PrimaryActionButton } from '../components/PrimaryActionButton';
+
+const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
 export function HomeScreen({ navigation }: HomeScreenProps) {
   const { theme, nightMode, setNightMode } = useContext(ThemeContext);
   const t = getTheme(theme);
 
-  const pickImage = async () => {
+  const goToSolving = (uri: string) => {
+    navigation.navigate('Solving', { imageUri: uri });
+  };
+
+  const importImage = async () => {
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ImagePicker.MediaTypeOptions.Images,
       quality: 1,
     });
     if (!result.canceled && result.assets[0]) {
-      navigation.navigate('ImagePreview', { imageUri: result.assets[0].uri });
+      goToSolving(result.assets[0].uri);
     }
   };
 
   const takePhoto = async () => {
     const { status } = await ImagePicker.requestCameraPermissionsAsync();
     if (status !== 'granted') {
-      Alert.alert('Permission needed', 'Camera access is required to capture sky images.');
+      Alert.alert(
+        'Camera needed',
+        'Allow camera access to photograph the sky.',
+      );
       return;
     }
     const result = await ImagePicker.launchCameraAsync({
       quality: 1,
     });
     if (!result.canceled && result.assets[0]) {
-      navigation.navigate('ImagePreview', { imageUri: result.assets[0].uri });
+      goToSolving(result.assets[0].uri);
     }
   };
 
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: t.bg }]} edges={['bottom']}>
       <StatusBar style={t.statusBar} />
-      <ScrollView contentContainerStyle={styles.scroll}>
+      <View style={styles.content}>
         <View style={styles.header}>
-          <Text style={[styles.title, { color: t.text }]}>AD ASTRA</Text>
+          <Text style={[styles.title, { color: t.text }]}>Ad Astra</Text>
           <Text style={[styles.subtitle, { color: t.textMuted }]}>
-            Offline Plate Solver
+            Point at the sky. Get coordinates.
           </Text>
+        </View>
+
+        <View style={styles.ctaArea}>
           <TouchableOpacity
-            style={[styles.nightToggle, { borderColor: t.cardBorder }]}
-            onPress={() => setNightMode(!nightMode)}
+            style={[styles.primaryBtn, { backgroundColor: t.accent }]}
+            onPress={takePhoto}
+            activeOpacity={0.8}
           >
-            <Text style={[styles.nightToggleText, { color: t.textMuted }]}>
-              {nightMode ? '☀ DAY' : '☾ NIGHT'}
+            <Text style={styles.primaryIcon}>📷</Text>
+            <Text style={styles.primaryLabel}>Take Photo</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.secondaryBtn, { borderColor: t.cardBorder }]}
+            onPress={importImage}
+            activeOpacity={0.7}
+          >
+            <Text style={[styles.secondaryLabel, { color: t.text }]}>
+              Choose from Library
             </Text>
           </TouchableOpacity>
         </View>
+      </View>
 
-        <View style={styles.statusGrid}>
-          <StatusCard
-            title="Catalog"
-            value="Hipparcos ≤ 8.5"
-            status="ready"
-            theme={theme}
-          />
-          <StatusCard
-            title="Index size"
-            value="3.8 MB"
-            status="ready"
-            theme={theme}
-          />
-          <StatusCard
-            title="Solver"
-            value="Available offline"
-            status="ready"
-            theme={theme}
-          />
-        </View>
-
-        <View style={styles.actions}>
-          <PrimaryActionButton
-            label="📷  Capture Sky Image"
-            theme={theme}
-            onPress={takePhoto}
-          />
-          <View style={{ height: 12 }} />
-          <PrimaryActionButton
-            label="🖼  Import Image"
-            theme={theme}
-            variant="secondary"
-            onPress={pickImage}
-          />
-          <View style={{ height: 12 }} />
-          <PrimaryActionButton
-            label="★  Use Sample Image"
-            theme={theme}
-            variant="secondary"
-            onPress={() => navigation.navigate('ImagePreview', { imageUri: 'sample' })}
-          />
-        </View>
-
-        <View style={[styles.tipBox, { borderColor: t.cardBorder }]}>
-          <Text style={[styles.tipTitle, { color: t.text }]}>Tips for best results</Text>
-          <Text style={[styles.tipText, { color: t.textMuted }]}>
-            • Use images with at least 15 visible stars{'\n'}
-            • Avoid heavy light pollution or clouds{'\n'}
-            • Wider fields solve faster than narrow ones{'\n'}
-            • Works fully offline — no network needed
-          </Text>
-        </View>
-      </ScrollView>
+      <TouchableOpacity
+        style={styles.modePill}
+        onPress={() => setNightMode(!nightMode)}
+        activeOpacity={0.6}
+      >
+        <Text style={[styles.modePillText, { color: t.textMuted }]}>
+          {nightMode ? '🌙 Night' : '☀ Day'}
+        </Text>
+      </TouchableOpacity>
     </SafeAreaView>
   );
 }
+
+const BTN_WIDTH = SCREEN_WIDTH - 64;
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
   },
-  scroll: {
-    padding: 20,
+  content: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 32,
   },
   header: {
-    marginBottom: 28,
-    position: 'relative',
+    alignItems: 'center',
+    marginBottom: 48,
   },
   title: {
-    fontSize: 32,
-    fontWeight: '900',
-    letterSpacing: 6,
-    fontFamily: 'Courier',
+    fontSize: 34,
+    fontWeight: '700',
+    letterSpacing: 1,
   },
   subtitle: {
-    fontSize: 14,
-    letterSpacing: 2,
-    marginTop: 4,
-    fontFamily: 'Courier',
+    fontSize: 16,
+    marginTop: 8,
   },
-  nightToggle: {
-    position: 'absolute',
-    top: 0,
-    right: 0,
-    borderWidth: 1,
-    borderRadius: 6,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
+  ctaArea: {
+    width: BTN_WIDTH,
+    alignItems: 'stretch',
   },
-  nightToggleText: {
-    fontSize: 12,
-    fontFamily: 'Courier',
+  primaryBtn: {
+    height: 88,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  primaryIcon: {
+    fontSize: 28,
+    marginBottom: 4,
+  },
+  primaryLabel: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#FFFFFF',
+  },
+  secondaryBtn: {
+    height: 56,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 16,
+    borderWidth: 1.5,
+  },
+  secondaryLabel: {
+    fontSize: 17,
     fontWeight: '600',
   },
-  statusGrid: {
-    marginBottom: 28,
+  modePill: {
+    position: 'absolute',
+    top: 16,
+    right: 20,
+    paddingVertical: 6,
+    paddingHorizontal: 14,
   },
-  actions: {
-    marginBottom: 28,
-  },
-  tipBox: {
-    borderWidth: 1,
-    borderRadius: 10,
-    padding: 16,
-  },
-  tipTitle: {
+  modePillText: {
     fontSize: 14,
-    fontWeight: '700',
-    marginBottom: 8,
-    fontFamily: 'Courier',
-  },
-  tipText: {
-    fontSize: 13,
-    lineHeight: 20,
+    fontWeight: '600',
   },
 });
