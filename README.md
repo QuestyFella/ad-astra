@@ -8,8 +8,8 @@ rotation - completely offline, no network required.
 
 Ad Astra converts [ESA's Tetra3](https://github.com/esa/tetra3) star-catalog
 databases into a compact binary format (`.adb`) and ships its own Rust solver.
-No NumPy or Python runtime is needed at solve time - the Rust solver is
-compiled to WebAssembly and runs entirely inside the Expo / React Native app.
+No NumPy or Python runtime is needed at solve time - the Rust solver runs
+either natively (Android via JNI) or compiled to WebAssembly (fallback).
 
 ## Installation and Usage
 
@@ -46,19 +46,32 @@ wasm-bindgen target/wasm32-unknown-unknown/release/ad_astra_solver_wasm.wasm \
   --out-dir ../../mobile/app/wasm --target web
 ```
 
+Build the Android native library (requires Android NDK + `cargo-ndk`):
+
+```bash
+export JAVA_HOME=/opt/homebrew/opt/openjdk@17
+export ANDROID_HOME=$HOME/Library/Android/sdk
+scripts/build-android-native.sh
+```
+
 ### Mobile app (Expo / React Native)
+
+Requires Android SDK / NDK (API 34) and JDK 17.
 
 ```bash
 cd mobile
 npm install
-npm start                      # Expo dev server (press i for iOS, a for Android)
+npx expo run:android          # development build (requires device via USB)
 ```
 
-For the solver to work, serve the `.adb` database locally in development:
+For the WASM solver to work in Expo Go, serve the `.adb` database locally:
 
 ```bash
 python -m http.server 8765     # from project root, serves data/processed/default.adb
 ```
+
+For native Android development builds, the database should be copied to
+the device's app storage (see `app/utils/databaseLoader.ts`).
 
 ## How the pipeline works
 
@@ -68,16 +81,18 @@ The project has three stages that run at different times:
                           build time (Python)                runtime (mobile)
   ┌─────────────┐     ┌─────────────────────┐     ┌──────────────────────────────┐
   │ Tetra3 .npz │ ──▶ │ scripts/build_adb.py │ ──▶ │      .adb binary database     │
-  │ (catalog +  │     │ mobile_db.convert_  │     │     loaded into WASM memory   │
+  │ (catalog +  │     │ mobile_db.convert_  │     │   (loaded by path on Android) │
   │  patterns)  │     │ tetra3_to_adb()      │     └──────────┬───────────────────┘
   └─────────────┘     └─────────────────────┘                │
-                                                               │
+                                                                │
   ┌──────────────────────────────────────────────────────────▼─┐
   │                    Mobile app (Expo / React Native)         │
   │                                                            │
-  │  camera capture ─▶ star detection ─▶ Rust WASM solver ─▶   │
-  │                                           RA / Dec / FOV   │
-  │                                           / rotation       │
+  │  camera capture ─▶ star detection ─▶ Rust solver ─────▶   │
+  │                                        ├─ native (JNI)    │
+  │                                        └─ WASM (fallback) │
+  │                                          RA / Dec / FOV   │
+  │                                          / rotation       │
   └────────────────────────────────────────────────────────────┘
 ```
 
@@ -107,8 +122,20 @@ python scripts/build_adb.py
 
 ### 2. Plate solving (Rust, runtime)
 
-At solve time the mobile app calls the Rust solver, compiled to
-WebAssembly. The WASM module exposes a single function:
+At solve time the mobile app calls the Rust solver. On Android it runs
+natively via JNI (`native/ad_astra_solver_ffi/`); on other platforms (web,
+Expo Go) it uses the WebAssembly fallback (`native/ad_astra_solver_wasm/`).
+
+The native JNI functions (`native/ad_astra_solver_ffi/src/lib.rs`):
+
+```c
+char* nativePing();
+char* nativeLoadDatabase(const char* path);
+char* nativeSolveSources(const char* sources_json, uint32_t width, uint32_t height);
+void  nativeUnloadDatabase();
+```
+
+The WASM wrapper exposes a single function:
 
 ```typescript
 solve(db_bytes: Uint8Array, sources_json: string,
@@ -179,17 +206,19 @@ The app has two tabs: **Solve** and **About**.
    MAD noise estimate → threshold at `thresholdSigma × noise` → flood-fill
    connected components → flux-weighted centroid. Returns the top 50 stars
    by flux. Images are pre-resized to ≤ 1024 px (`expo-image-manipulator`).
-3. **Solve** (`app/utils/solver.ts`) - sources are JSON-serialized and
-   passed to the WASM `solve()` function along with the `.adb` database
-   bytes and image dimensions. The result is parsed back from JSON.
+3. **Solve** (`app/utils/solver.ts`) - the solver wrapper detects the
+    available backend at startup: native Android module first, WASM as
+    fallback. Sources are JSON-serialized and sent to whichever backend
+    is active. The result is parsed back from JSON.
 4. **Display** (`app/screens/ResultScreen.tsx`) - shows the image with a
    star overlay (green dots = detected, orange rings = matched), a
    coordinate readout (RA, Dec, FOV, Rotation), and share/new-photo actions.
 
-The solver (WASM) and database are loaded once at app startup
-(`App.tsx` → `initSolver()` + `loadDatabase()`). In development the `.adb`
-is fetched from a local HTTP server; in production it can be bundled or
-downloaded.
+The solver and database are loaded once at app startup
+(`App.tsx` → `initSolver()` + `loadDatabase()`). On Android the database
+is loaded from a local file path via JNI (avoids copying 47 MB through
+the JS bridge). In development the `.adb` is fetched from a local HTTP
+server or bundled; in production it can be bundled or downloaded.
 
 ## Project structure
 
@@ -214,7 +243,11 @@ ad-astra/
         types.rs                 #   serde request/result DTOs
       tests/solve_real_db.rs    #   integration tests (needs .adb)
     ad_astra_solver_wasm/       # Rust → WASM wrapper (wasm-bindgen)
+    ad_astra_solver_ffi/        # Rust → Android JNI wrapper (.so)
   mobile/                       # Expo / React Native app
+    modules/
+      ad-astra-solver-native/   #   local Expo native module (Kotlin/JNI)
+  ...
     app/screens/                #   HomeScreen, SolvingScreen, ResultScreen, AboutScreen
     app/components/             #   CoordinateReadout, StarMarkerLayer
     app/store/solver.ts         #   solve orchestration hook
