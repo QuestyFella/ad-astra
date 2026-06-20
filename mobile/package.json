@@ -9,6 +9,7 @@
     "expo": "~54.0.0",
     "expo-asset": "^56.0.17",
     "expo-camera": "~17.0.0",
+    "expo-dev-client": "~6.0.21",
     "expo-file-system": "~19.0.0",
     "expo-haptics": "~15.0.0",
     "expo-image-manipulator": "^56.0.19",

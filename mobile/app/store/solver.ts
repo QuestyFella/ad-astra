@@ -163,7 +163,7 @@ export function useSolver() {
       setCurrentStep('verifying');
       setState('verifying_solution');
 
-      const solveResult = solvePlate(imageWidth, imageHeight, detectedStarsRaw);
+      const solveResult = await solvePlate(imageWidth, imageHeight, detectedStarsRaw);
 
       if (cancelledRef.current) {
         setState('cancelled');
