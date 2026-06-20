@@ -9,6 +9,55 @@ databases into a compact binary format (`.adb`) and ships its own Rust solver.
 No NumPy or Python runtime is needed at solve time - the Rust solver is
 compiled to WebAssembly and runs entirely inside the Expo / React Native app.
 
+## Installation and Usage
+
+### Python (catalog & database)
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+pytest
+```
+
+Build the `.adb` database (requires Tetra3 installed as an optional extra):
+
+```bash
+python scripts/build_adb.py
+# → data/processed/default.adb  (~94 MB)
+```
+
+### Rust (solver)
+
+```bash
+cd native/ad_astra_solver
+cargo test                     # unit tests
+cargo test -- --ignored        # integration tests (requires .adb at data/processed/)
+```
+
+Build the WASM module (requires `wasm32-unknown-unknown` target +
+`wasm-bindgen-cli`):
+
+```bash
+cd native/ad_astra_solver_wasm
+cargo build --release --target wasm32-unknown-unknown
+wasm-bindgen target/wasm32-unknown-unknown/release/ad_astra_solver_wasm.wasm \
+  --out-dir ../../mobile/app/wasm --target web
+```
+
+### Mobile app (Expo / React Native)
+
+```bash
+cd mobile
+npm install
+npm start                      # Expo dev server (press i for iOS, a for Android)
+```
+
+For the solver to work, serve the `.adb` database locally in development:
+
+```bash
+python -m http.server 8765     # from project root, serves data/processed/default.adb
+```
+
 ## How the pipeline works
 
 The project has three stages that run at different times:
@@ -175,55 +224,6 @@ ad-astra/
   tests/                        # Python unit tests (pytest)
   data/                         # raw & processed catalog data (gitignored)
   docs/                         # architecture & format documentation
-```
-
-## Quick start
-
-### Python (catalog & database)
-
-```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
-pytest
-```
-
-Build the `.adb` database (requires Tetra3 installed as an optional extra):
-
-```bash
-python scripts/build_adb.py
-# → data/processed/default.adb  (~94 MB)
-```
-
-### Rust (solver)
-
-```bash
-cd native/ad_astra_solver
-cargo test                     # unit tests
-cargo test -- --ignored        # integration tests (requires .adb at data/processed/)
-```
-
-Build the WASM module (requires `wasm32-unknown-unknown` target +
-`wasm-bindgen-cli`):
-
-```bash
-cd native/ad_astra_solver_wasm
-cargo build --release --target wasm32-unknown-unknown
-wasm-bindgen target/wasm32-unknown-unknown/release/ad_astra_solver_wasm.wasm \
-  --out-dir ../../mobile/app/wasm --target web
-```
-
-### Mobile app (Expo / React Native)
-
-```bash
-cd mobile
-npm install
-npm start                      # Expo dev server (press i for iOS, a for Android)
-```
-
-For the solver to work, serve the `.adb` database locally in development:
-
-```bash
-python -m http.server 8765     # from project root, serves data/processed/default.adb
 ```
 
 ## Database format
