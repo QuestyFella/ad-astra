@@ -10,12 +10,35 @@
 //! 6. Return the best solution (RA/Dec/FOV/roll + overlay data).
 
 use std::path::Path;
-use std::time::Instant;
 
 use crate::db;
 use crate::geometry::{Affine2D, RadialQuad2D, TangentPlane, Vec3};
 use crate::hash::{generate_image_quads, compute_quad_hash, dist_matrix_3d, HashIndex, ImageQuad};
 use crate::types::{DetectedStar, ImageSource, MatchedStarInfo, SolveResult, SolveSourcesRequest};
+
+// ═══ Platform-adaptive timer ═══
+// std::time::Instant is not available on wasm32-unknown-unknown.
+
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+
+#[cfg(not(target_arch = "wasm32"))]
+type Timer = Instant;
+
+#[cfg(not(target_arch = "wasm32"))]
+fn timer_now() -> Timer { Instant::now() }
+
+#[cfg(not(target_arch = "wasm32"))]
+fn timer_elapsed(t: &Timer) -> u64 { t.elapsed().as_millis() as u64 }
+
+#[cfg(target_arch = "wasm32")]
+type Timer = u64;
+
+#[cfg(target_arch = "wasm32")]
+fn timer_now() -> Timer { 0u64 }
+
+#[cfg(target_arch = "wasm32")]
+fn timer_elapsed(_t: &Timer) -> u64 { 0 }
 
 /// Maximum number of brightest sources used for quad generation.
 const MAX_SOURCES_FOR_QUADS: usize = 25;
@@ -85,7 +108,7 @@ pub fn solve_sources_with_db(
     db: db::AdbDatabase,
     db_id: &str,
 ) -> SolveResult {
-    let start = Instant::now();
+    let start = timer_now();
     let mut log: Vec<String> = Vec::new();
 
     log.push(format!(
@@ -119,7 +142,7 @@ pub fn solve_sources_with_db(
         .collect();
 
     if request.sources.is_empty() {
-        let elapsed = elapsed_ms(&start);
+        let elapsed = timer_elapsed(&start);
         let mut result = SolveResult::failure(log);
         result.database_id = Some(db_id.to_string());
         result.solve_time_ms = elapsed;
@@ -137,7 +160,7 @@ pub fn solve_sources_with_db(
     log.push(format!("Generated {} image quads", image_quads.len()));
 
     if image_quads.is_empty() {
-        let elapsed = elapsed_ms(&start);
+        let elapsed = timer_elapsed(&start);
         let mut result = SolveResult::failure(log);
         result.database_id = Some(db_id.to_string());
         result.solve_time_ms = elapsed;
@@ -151,7 +174,7 @@ pub fn solve_sources_with_db(
     log.push(format!("Found {} candidates", candidates.len()));
 
     if candidates.is_empty() {
-        let elapsed = elapsed_ms(&start);
+        let elapsed = timer_elapsed(&start);
         let mut result = SolveResult::failure(log);
         result.database_id = Some(db_id.to_string());
         result.solve_time_ms = elapsed;
@@ -176,7 +199,7 @@ pub fn solve_sources_with_db(
     }
 
     if best.is_none() {
-        let elapsed = elapsed_ms(&start);
+        let elapsed = timer_elapsed(&start);
         let mut result = SolveResult::failure(log);
         result.database_id = Some(db_id.to_string());
         result.solve_time_ms = elapsed;
@@ -229,7 +252,7 @@ pub fn solve_sources_with_db(
         confidence,
         matched_stars: solution.matched_stars,
         rms_error_arcsec: Some(solution.rms_arcsec as f32),
-        solve_time_ms: elapsed_ms(&start),
+        solve_time_ms: timer_elapsed(&start),
         database_id: Some(db_id.to_string()),
         log,
         detected_stars,
@@ -237,10 +260,6 @@ pub fn solve_sources_with_db(
     };
 
     result
-}
-
-fn elapsed_ms(start: &Instant) -> u64 {
-    start.elapsed().as_millis() as u64
 }
 
 /// find candidate image↔catalog matches by hash lookup.

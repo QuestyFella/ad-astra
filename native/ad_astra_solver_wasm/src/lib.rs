@@ -1,6 +1,10 @@
 use wasm_bindgen::prelude::*;
 use ad_astra_solver::{solve_sources_with_db, db, types::{SolveSourcesRequest, ImageSource}};
 
+// Use wee_alloc to avoid dlmalloc assertion failures with large WASM heaps
+#[global_allocator]
+static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
+
 /// Solve from detected star centroids.
 ///
 /// # Arguments

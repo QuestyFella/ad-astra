@@ -11,16 +11,27 @@
  * 7. Return sorted by brightness (brightest first)
  */
 
-import * as ImageManipulator from "expo-image-manipulator";
+/**
+ * Star detection and centroid extraction from astrophotography images.
+ *
+ * Algorithm:
+ * 1. Resize image to manageable dimensions
+ * 2. Convert to grayscale
+ * 3. Estimate local background (box blur)
+ * 4. Subtract background, threshold
+ * 5. Find connected components (bright regions)
+ * 6. Compute centroid and flux for each star
+ * 7. Return sorted by brightness (brightest first)
+ */
 
-interface DetectedStar {
+export interface DetectedStar {
   x: number;
   y: number;
   flux: number;
 }
 
-interface StarDetectionOptions {
-  /** Max dimension to resize to before processing (performance vs accuracy trade-off) */
+export interface StarDetectionOptions {
+  /** Max dimension to resize to before processing */
   maxDimension?: number;
   /** Threshold above local background in sigma units */
   thresholdSigma?: number;
@@ -34,7 +45,7 @@ interface StarDetectionOptions {
   maxStars?: number;
 }
 
-const DEFAULT_OPTIONS: Required<StarDetectionOptions> = {
+export const DEFAULT_OPTIONS: Required<StarDetectionOptions> = {
   maxDimension: 1024,
   thresholdSigma: 5.0,
   minRadiusPx: 1,
@@ -44,52 +55,40 @@ const DEFAULT_OPTIONS: Required<StarDetectionOptions> = {
 };
 
 /**
- * Detect stars in an image and return centroid positions and fluxes.
+ * Detect stars directly from RGBA pixel data (no image loading).
+ * Each pixel is 4 values: R, G, B, A.
  */
-export async function detectStars(
-  imageUri: string,
+export function detectStarsFromPixels(
+  rgbaPixels: Uint8ClampedArray,
+  width: number,
+  height: number,
   options: StarDetectionOptions = {}
-): Promise<DetectedStar[]> {
+): DetectedStar[] {
   const opts = { ...DEFAULT_OPTIONS, ...options };
 
-  // 1. Load image and get pixel data
-  const { base64, width, height } = await loadImagePixels(imageUri, opts.maxDimension);
-  if (!base64) {
-    throw new Error("Failed to load image pixels");
-  }
+  // Convert to grayscale
+  const grayscale = rgbaToGrayscale(rgbaPixels, width, height);
 
-  const pixels = new Uint8ClampedArray(Buffer.from(base64, "base64"));
-
-  // 2. Convert to grayscale float array
-  const grayscale = new Float32Array(width * height);
-  for (let i = 0; i < width * height; i++) {
-    const r = pixels[i * 4];
-    const g = pixels[i * 4 + 1];
-    const b = pixels[i * 4 + 2];
-    // Standard luminance formula
-    grayscale[i] = 0.299 * r + 0.587 * g + 0.114 * b;
-  }
-
-  // 3. Estimate background with box blur
+  // Estimate background with box blur
   const background = boxBlur(grayscale, width, height, 15);
 
-  // 4. Subtract background
+  // Subtract background
   const subtracted = new Float32Array(width * height);
   for (let i = 0; i < width * height; i++) {
     subtracted[i] = Math.max(0, grayscale[i] - background[i]);
   }
 
-  // 5. Compute noise level (median of subtracted image)
+  // Compute noise level
   const noiseLevel = estimateNoise(subtracted);
 
-  // 6. Threshold
+  // Threshold
   const threshold = opts.thresholdSigma * noiseLevel;
   const binary = new Uint8Array(width * height);
   for (let i = 0; i < width * height; i++) {
     binary[i] = subtracted[i] > threshold ? 1 : 0;
   }
 
-  // 7. Find connected components
+  // Find connected components
   const stars = findConnectedComponents(
     binary,
     subtracted,
@@ -100,7 +99,7 @@ export async function detectStars(
     opts.minFlux
   );
 
-  // 8. Sort by flux (brightest first) and limit
+  // Sort by flux (brightest first) and limit
   stars.sort((a, b) => b.flux - a.flux);
   return stars.slice(0, opts.maxStars).map((s) => ({
     x: s.x,
@@ -109,11 +108,45 @@ export async function detectStars(
   }));
 }
 
+/**
+ * Detect stars in an image URI — loads image, then delegates to detectStarsFromPixels.
+ */
+export async function detectStars(
+  imageUri: string,
+  options: StarDetectionOptions = {}
+): Promise<DetectedStar[]> {
+  const opts = { ...DEFAULT_OPTIONS, ...options };
+
+  const { base64, width, height } = await loadImagePixels(imageUri, opts.maxDimension);
+  if (!base64) {
+    throw new Error("Failed to load image pixels");
+  }
+
+  const pixels = new Uint8ClampedArray(Buffer.from(base64, "base64"));
+  return detectStarsFromPixels(pixels, width, height, options);
+}
+
+/** Convert RGBA pixel array to grayscale float values. */
+export function rgbaToGrayscale(
+  rgba: Uint8ClampedArray,
+  width: number,
+  height: number
+): Float32Array {
+  const gray = new Float32Array(width * height);
+  for (let i = 0; i < width * height; i++) {
+    const r = rgba[i * 4];
+    const g = rgba[i * 4 + 1];
+    const b = rgba[i * 4 + 2];
+    gray[i] = 0.299 * r + 0.587 * g + 0.114 * b;
+  }
+  return gray;
+}
+
 async function loadImagePixels(
   uri: string,
   maxDimension: number
 ): Promise<{ base64: string | null; width: number; height: number }> {
-  // Get image dimensions first
+  const ImageManipulator = await import("expo-image-manipulator");
   const manipulated = await ImageManipulator.manipulateAsync(
     uri,
     [{ resize: { width: maxDimension } }],
