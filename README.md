@@ -1,6 +1,6 @@
 # ad-astra
 
-##(This project lowkey exists because I wanted to try Rust)
+## (This project lowkey exists because I wanted to try Rust)
 
 Offline plate-solving engine for mobile devices. Take a photo of the night
 sky and get back celestial coordinates (RA, Dec), field-of-view, and image
