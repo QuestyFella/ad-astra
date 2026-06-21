@@ -23,3 +23,6 @@ mobile/android/
 # Rust
 native/*/target/
 *.adb
+
+# Session context (auto-generated knowledge base)
+SESSION_CONTEXT.md
