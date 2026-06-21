@@ -9,6 +9,7 @@
 //!    matched stars.
 //! 6. Return the best solution (RA/Dec/FOV/roll + overlay data).
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use crate::db;
@@ -63,6 +64,69 @@ const VERIFY_MATCH_RADIUS_ARCSEC: f64 = 60.0;
 /// Minimum matched stars for a candidate to be accepted as a solution.
 /// Rejects chance coincidences that pass the radius threshold above.
 const MIN_MATCHED_STARS: u32 = 6;
+
+/// Uniform-grid spatial index for fast nearest-neighbor lookup among
+/// catalog stars projected onto a tangent plane.
+///
+/// Replaces an O(n_catalog) brute-force scan per image source with an
+/// O(1) average grid-cell lookup.  Built once per `verify_single` call
+/// from the projected coordinate array.
+struct CatalogGrid {
+    cell_size: f64,
+    cells: HashMap<(i32, i32), Vec<usize>>,
+}
+
+impl CatalogGrid {
+    fn build(points: &[(f64, f64)], cell_size: f64) -> Self {
+        let mut cells: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
+        for (i, &(xi, _)) in points.iter().enumerate() {
+            if xi == f64::MAX {
+                continue;
+            }
+            let gx = (xi / cell_size).floor() as i32;
+            let gy = (points[i].1 / cell_size).floor() as i32;
+            cells.entry((gx, gy)).or_default().push(i);
+        }
+        CatalogGrid { cell_size, cells }
+    }
+
+    /// Find the nearest point to `(xi, eta)` within `max_dist`.
+    /// Returns `(index, dist_sq)` or `None`.
+    fn nearest_within(
+        &self,
+        points: &[(f64, f64)],
+        xi: f64,
+        eta: f64,
+        max_dist: f64,
+    ) -> Option<(usize, f64)> {
+        let max_dist_sq = max_dist * max_dist;
+        let gx = (xi / self.cell_size).floor() as i32;
+        let gy = (eta / self.cell_size).floor() as i32;
+        let r = ((max_dist / self.cell_size).ceil() as i32).max(1);
+
+        let mut best_dist_sq = max_dist_sq;
+        let mut best_idx: Option<usize> = None;
+
+        for dx in -r..=r {
+            for dy in -r..=r {
+                if let Some(cell) = self.cells.get(&(gx + dx, gy + dy)) {
+                    for &idx in cell {
+                        let (cat_xi, cat_eta) = points[idx];
+                        let ddx = xi - cat_xi;
+                        let ddy = eta - cat_eta;
+                        let dist_sq = ddx * ddx + ddy * ddy;
+                        if dist_sq < best_dist_sq {
+                            best_dist_sq = dist_sq;
+                            best_idx = Some(idx);
+                        }
+                    }
+                }
+            }
+        }
+
+        best_idx.map(|idx| (idx, best_dist_sq))
+    }
+}
 
 /// An image–catalog pattern correspondence awaiting verification.
 struct Candidate {
@@ -463,13 +527,18 @@ fn verify_single(
         })
         .collect();
 
+    // Build spatial grid for O(1) nearest-neighbor lookups.
+    // Cell size = widest search radius so a 3×3 cell query always suffices.
+    let iter_radii_arcsec: [f64; 5] = [900.0, 400.0, 200.0, 100.0, 60.0];
+    let grid_cell_size = iter_radii_arcsec[0] / 3600.0 * std::f64::consts::PI / 180.0;
+    let grid = CatalogGrid::build(&cat_tangent_all, grid_cell_size);
+
     // ── Phase 3: multi-scale matching + iterative refit ──
     // Start with the 4-point affine, match at a wide radius to catch
     // enough stars, then refit with a radial-quadratic model that
     // absorbs gnomonic distortion.  Narrow the radius each pass.
     let final_threshold_rad =
         VERIFY_MATCH_RADIUS_ARCSEC / 3600.0 * std::f64::consts::PI / 180.0;
-    let iter_radii_arcsec: [f64; 5] = [900.0, 400.0, 200.0, 100.0, 60.0];
 
     let mut matched: Vec<MatchedStarInfo> = Vec::new();
     #[allow(unused_assignments)]
@@ -484,7 +553,6 @@ fn verify_single(
     for _iter in 0..iter_radii_arcsec.len() {
         let iter_threshold_rad =
             iter_radii_arcsec[_iter] / 3600.0 * std::f64::consts::PI / 180.0;
-        let iter_threshold_sq = iter_threshold_rad * iter_threshold_rad;
 
         matched.clear();
         refine_source_pts.clear();
@@ -496,20 +564,7 @@ fn verify_single(
                 None => affine.apply(s.x_px, s.y_px),
             };
 
-            let mut best_dist_sq = f64::MAX;
-            let mut best_j: usize = 0;
-            for (j, &(cat_xi, cat_eta)) in cat_tangent_all.iter().enumerate() {
-                if cat_xi == f64::MAX { continue; }
-                let dx = xi - cat_xi;
-                let dy = eta - cat_eta;
-                let dist_sq = dx * dx + dy * dy;
-                if dist_sq < best_dist_sq {
-                    best_dist_sq = dist_sq;
-                    best_j = j;
-                }
-            }
-
-            if best_dist_sq < iter_threshold_sq {
+            if let Some((best_j, _)) = grid.nearest_within(&cat_tangent_all, xi, eta, iter_threshold_rad) {
                 let star = &db.stars[best_j];
                 let (ra, dec) = (
                     (star.ra_rad as f64).to_degrees().rem_euclid(360.0),
@@ -543,7 +598,6 @@ fn verify_single(
     }
 
     // Final re-match at the tightest radius.
-    let final_threshold_sq = final_threshold_rad * final_threshold_rad;
     matched.clear();
     rms_sum_sq = 0.0;
     for s in sources.iter() {
@@ -551,19 +605,7 @@ fn verify_single(
             Some(q) => q.apply(s.x_px, s.y_px),
             None => affine.apply(s.x_px, s.y_px),
         };
-        let mut best_dist_sq = f64::MAX;
-        let mut best_j: usize = 0;
-        for (j, &(cat_xi, cat_eta)) in cat_tangent_all.iter().enumerate() {
-            if cat_xi == f64::MAX { continue; }
-            let dx = xi - cat_xi;
-            let dy = eta - cat_eta;
-            let dist_sq = dx * dx + dy * dy;
-            if dist_sq < best_dist_sq {
-                best_dist_sq = dist_sq;
-                best_j = j;
-            }
-        }
-        if best_dist_sq < final_threshold_sq {
+        if let Some((best_j, best_dist_sq)) = grid.nearest_within(&cat_tangent_all, xi, eta, final_threshold_rad) {
             let star = &db.stars[best_j];
             rms_sum_sq += best_dist_sq;
             let (ra, dec) = (
