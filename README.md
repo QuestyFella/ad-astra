@@ -1,6 +1,9 @@
-# ad-astra
+# ad-astra :)
 
 ## (This project lowkey exists because I wanted to try Rust)
+
+**WIP** -- this project is under active development and things may break or
+change without notice. Pull requests are welcome!
 
 Offline plate-solving engine for mobile devices. Take a photo of the night
 sky and get back celestial coordinates (RA, Dec), field-of-view, and image
