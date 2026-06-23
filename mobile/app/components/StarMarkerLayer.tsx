@@ -1,7 +1,7 @@
 import React from 'react';
 import { View, StyleSheet } from 'react-native';
 import type { DetectedStar, MatchedStar } from '../types/solver';
-import { colors } from '../theme/colors';
+import { tokens } from '../theme/tokens';
 
 interface StarMarkerLayerProps {
   imageWidth: number;
@@ -25,10 +25,18 @@ export function StarMarkerLayer({
   const scaleX = displayWidth / imageWidth;
   const scaleY = displayHeight / imageHeight;
 
-  const matchedSet = new Set(matchedStars.map((m) => `${m.imageX.toFixed(0)},${m.imageY.toFixed(0)}`));
+  const matchedSet = new Set(
+    matchedStars.map((m) => `${m.imageX.toFixed(0)},${m.imageY.toFixed(0)}`),
+  );
 
   return (
-    <View style={[styles.container, { width: displayWidth, height: displayHeight }]}>
+    <View
+      style={[
+        styles.container,
+        { width: displayWidth, height: displayHeight },
+      ]}
+      pointerEvents="none"
+    >
       {showAllDetections &&
         detectedStars
           .filter((s) => !matchedSet.has(`${s.x.toFixed(0)},${s.y.toFixed(0)}`))
@@ -50,8 +58,8 @@ export function StarMarkerLayer({
           style={[
             styles.matchedRing,
             {
-              left: star.imageX * scaleX - 6,
-              top: star.imageY * scaleY - 6,
+              left: star.imageX * scaleX - 7,
+              top: star.imageY * scaleY - 7,
             },
           ]}
         />
@@ -71,15 +79,16 @@ const styles = StyleSheet.create({
     width: 6,
     height: 6,
     borderRadius: 3,
-    backgroundColor: 'rgba(58, 232, 122, 0.6)',
+    backgroundColor: tokens.color.ink,
+    opacity: 0.5,
   },
   matchedRing: {
     position: 'absolute',
-    width: 12,
-    height: 12,
-    borderRadius: 6,
-    borderWidth: 2,
-    borderColor: colors.nightAccent,
-    backgroundColor: 'rgba(232, 93, 58, 0.25)',
+    width: 14,
+    height: 14,
+    borderRadius: 7,
+    borderWidth: 1.5,
+    borderColor: tokens.color.primary,
+    backgroundColor: 'rgba(0, 102, 204, 0.12)',
   },
 });

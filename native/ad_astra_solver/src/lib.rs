@@ -5,9 +5,12 @@ pub mod hash;
 pub mod solve;
 pub mod types;
 
-pub use db::{AdbDatabase, AdbHeader, PatternRecord, StarRecord};
+pub use db::{AdbDatabase, AdbHeader, PatternRecord, PreparedDatabase, StarRecord};
 pub use error::SolverError;
 pub use geometry::{Affine2D, TangentPlane, Vec3};
 pub use hash::{HashIndex, HashKey, HashResult, ImageQuad, QuadFeature};
-pub use solve::{solve_sources, solve_sources_with_db};
+pub use solve::{
+    clear_solve_cancel, is_solve_cancelled, request_solve_cancel, solve_prepared, solve_sources,
+    solve_sources_with_db,
+};
 pub use types::{DetectedStar, ImageSource, MatchedStarInfo, SolveResult, SolveSourcesRequest};

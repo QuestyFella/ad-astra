@@ -16,6 +16,8 @@ import {
   SyntheticStar,
   SyntheticFieldOptions,
 } from "../app/utils/syntheticImage";
+import { detectStarsFromPixels } from "../app/utils/starDetection";
+import UPNG from "upng-js";
 
 let passed = 0;
 let failed = 0;
@@ -202,6 +204,61 @@ function testSweepStarCounts() {
   }
 }
 
+function decodePngBase64(
+  base64: string
+): { pixels: Uint8ClampedArray; width: number; height: number } {
+  const binaryString = Buffer.from(base64, "base64").toString("binary");
+  const bytes = new Uint8Array(binaryString.length);
+  for (let i = 0; i < binaryString.length; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+
+  const png = UPNG.decode(bytes.buffer as ArrayBuffer);
+  const rgbaFrames = UPNG.toRGBA8(png);
+  if (!rgbaFrames.length) {
+    throw new Error("Failed to decode PNG image");
+  }
+
+  return {
+    pixels: new Uint8ClampedArray(rgbaFrames[0]),
+    width: png.width,
+    height: png.height,
+  };
+}
+
+// ───────── Test 11: Encoded PNG round-trip detection ─────────
+function testEncodedPngDetection() {
+  const star: SyntheticStar = { x: 200, y: 150, flux: 220, sigma: 2.0 };
+  const { rgba, width, height } = renderSyntheticField({
+    width: 400,
+    height: 300,
+    background: 10,
+    noiseSigma: 0.5,
+    stars: [star],
+  });
+
+  const pngBytes = UPNG.encode([rgba.buffer as ArrayBuffer], width, height, 0);
+  const base64 = Buffer.from(pngBytes).toString("base64");
+  const decoded = decodePngBase64(base64);
+
+  assert(decoded.width === width, `width mismatch: ${decoded.width} != ${width}`);
+  assert(decoded.height === height, `height mismatch: ${decoded.height} != ${height}`);
+  assert(
+    decoded.pixels.length === width * height * 4,
+    `pixel buffer length ${decoded.pixels.length} != ${width * height * 4}`
+  );
+
+  const detected = detectStarsFromPixels(decoded.pixels, decoded.width, decoded.height, {
+    thresholdSigma: 4,
+    minFlux: 50,
+  });
+  assert(detected.length >= 1, `expected at least one star from encoded PNG, got ${detected.length}`);
+
+  const errorPx = Math.hypot(detected[0].x - star.x, detected[0].y - star.y);
+  assert(errorPx < 1.0, `encoded PNG centroid error ${errorPx}px too large`);
+  console.log(`    decoded ${decoded.width}x${decoded.height}, detected ${detected.length} star(s), error=${errorPx.toFixed(3)}px`);
+}
+
 // ───────── Test 10: WYSIWYG — raw rendering check ─────────
 function testRenderConsistency() {
   // Verify that rendering produces a visible star above background
@@ -235,6 +292,7 @@ test("centroid accuracy < 0.5px at (247.3, 153.7)", testCentroidAccuracy);
 test("close stars (6px) acceptable merge", testCloseStars);
 test("stars at image edges detected", testEdgeStars);
 test("sweep star counts 5→50", testSweepStarCounts);
+test("encoded PNG round-trip detects synthetic star", testEncodedPngDetection);
 test("render produces visible star + clean background", testRenderConsistency);
 
 console.log(`\nResults: ${passed} passed, ${failed} failed, ${passed + failed} total`);

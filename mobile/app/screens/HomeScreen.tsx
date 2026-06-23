@@ -3,22 +3,31 @@ import {
   View,
   Text,
   StyleSheet,
-  TouchableOpacity,
   Alert,
-  Dimensions,
+  ScrollView,
+  Linking,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import { StatusBar } from 'expo-status-bar';
 import type { HomeScreenProps } from '../types/navigation';
 import { ThemeContext } from '../navigation/AppNavigator';
 import { getTheme } from '../theme/colors';
-
-const { width: SCREEN_WIDTH } = Dimensions.get('window');
+import { tokens } from '../theme/tokens';
+import { isSolverReady } from '../utils/solver';
+import {
+  ScreenShell,
+  ScreenHeader,
+  CaptureCard,
+  ButtonPrimary,
+  ButtonSecondaryPill,
+  ListGroup,
+  ListRow,
+  TextLink,
+} from '../components/ui';
 
 export function HomeScreen({ navigation }: HomeScreenProps) {
-  const { theme, nightMode, setNightMode } = useContext(ThemeContext);
+  const { theme } = useContext(ThemeContext);
   const t = getTheme(theme);
+  const catalogReady = isSolverReady();
 
   const goToSolving = (uri: string) => {
     navigation.navigate('Solving', { imageUri: uri });
@@ -37,131 +46,117 @@ export function HomeScreen({ navigation }: HomeScreenProps) {
   const takePhoto = async () => {
     const { status } = await ImagePicker.requestCameraPermissionsAsync();
     if (status !== 'granted') {
-      Alert.alert(
-        'Camera needed',
-        'Allow camera access to photograph the sky.',
-      );
+      Alert.alert('Camera needed', 'Allow camera access to photograph the sky.');
       return;
     }
-    const result = await ImagePicker.launchCameraAsync({
-      quality: 1,
-    });
+    const result = await ImagePicker.launchCameraAsync({ quality: 1 });
     if (!result.canceled && result.assets[0]) {
       goToSolving(result.assets[0].uri);
     }
   };
 
   return (
-    <SafeAreaView style={[styles.container, { backgroundColor: t.bg }]} edges={['bottom']}>
-      <StatusBar style={t.statusBar} />
-      <View style={styles.content}>
-        <View style={styles.header}>
-          <Text style={[styles.title, { color: t.text }]}>Ad Astra</Text>
-          <Text style={[styles.subtitle, { color: t.textMuted }]}>
-            Point at the sky. Get coordinates.
+    <ScreenShell theme={t} edges={['top']}>
+      <ScrollView
+        contentContainerStyle={styles.scroll}
+        showsVerticalScrollIndicator={false}
+      >
+        <ScreenHeader
+          theme={t}
+          title="Solve"
+          subtitle="Identify a star field from a photo — fully offline."
+        />
+
+        <CaptureCard theme={t} onPress={takePhoto} />
+
+        <View style={styles.actions}>
+          <ButtonPrimary
+            label="Take Photo"
+            onPress={takePhoto}
+            fullWidth
+          />
+          <ButtonSecondaryPill
+            label="Choose from Library"
+            onPress={importImage}
+            fullWidth
+          />
+        </View>
+
+        <ListGroup theme={t} title="How it works">
+          <ListRow
+            label="Capture"
+            detail="Photograph a clear star field"
+          />
+          <ListRow
+            label="Detect"
+            detail="Find star centroids on-device"
+          />
+          <ListRow
+            label="Solve"
+            detail="Match against the Hipparcos catalog"
+          />
+        </ListGroup>
+
+        <TextLink
+          label="View on GitHub ↗"
+          onPress={() => Linking.openURL('https://github.com/QuestyFella/ad-astra')}
+          theme={t}
+          style={styles.link}
+        />
+
+        <View
+          style={[
+            styles.statusChip,
+            {
+              backgroundColor: t.card,
+              borderColor: t.hairline,
+            },
+          ]}
+        >
+          <View
+            style={[
+              styles.statusDot,
+              { backgroundColor: catalogReady ? t.primary : t.textMuted },
+            ]}
+          />
+          <Text style={[styles.statusText, { color: t.textMuted }]}>
+            {catalogReady ? 'Catalog loaded · Offline ready' : 'Catalog not loaded'}
           </Text>
         </View>
-
-        <View style={styles.ctaArea}>
-          <TouchableOpacity
-            style={[styles.primaryBtn, { backgroundColor: t.accent }]}
-            onPress={takePhoto}
-            activeOpacity={0.8}
-          >
-            <Text style={styles.primaryIcon}>📷</Text>
-            <Text style={styles.primaryLabel}>Take Photo</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[styles.secondaryBtn, { borderColor: t.cardBorder }]}
-            onPress={importImage}
-            activeOpacity={0.7}
-          >
-            <Text style={[styles.secondaryLabel, { color: t.text }]}>
-              Choose from Library
-            </Text>
-          </TouchableOpacity>
-        </View>
-      </View>
-
-      <TouchableOpacity
-        style={styles.modePill}
-        onPress={() => setNightMode(!nightMode)}
-        activeOpacity={0.6}
-      >
-        <Text style={[styles.modePillText, { color: t.textMuted }]}>
-          {nightMode ? '🌙 Night' : '☀ Day'}
-        </Text>
-      </TouchableOpacity>
-    </SafeAreaView>
+      </ScrollView>
+    </ScreenShell>
   );
 }
 
-const BTN_WIDTH = SCREEN_WIDTH - 64;
-
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
+  scroll: {
+    flexGrow: 1,
+    paddingBottom: tokens.space.xxl,
   },
-  content: {
-    flex: 1,
-    justifyContent: 'center',
+  actions: {
+    gap: tokens.space.sm,
+    marginBottom: tokens.space.xl,
+  },
+  link: {
+    marginTop: tokens.space.xs,
+    marginLeft: tokens.space.xxs,
+  },
+  statusChip: {
+    flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 32,
+    alignSelf: 'flex-start',
+    borderRadius: tokens.radius.pill,
+    borderWidth: StyleSheet.hairlineWidth,
+    paddingVertical: tokens.space.xs,
+    paddingHorizontal: tokens.space.md,
   },
-  header: {
-    alignItems: 'center',
-    marginBottom: 48,
+  statusDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    marginRight: tokens.space.xs,
   },
-  title: {
-    fontSize: 34,
-    fontWeight: '700',
-    letterSpacing: 1,
-  },
-  subtitle: {
-    fontSize: 16,
-    marginTop: 8,
-  },
-  ctaArea: {
-    width: BTN_WIDTH,
-    alignItems: 'stretch',
-  },
-  primaryBtn: {
-    height: 88,
-    borderRadius: 18,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  primaryIcon: {
-    fontSize: 28,
-    marginBottom: 4,
-  },
-  primaryLabel: {
-    fontSize: 20,
-    fontWeight: '700',
-    color: '#FFFFFF',
-  },
-  secondaryBtn: {
-    height: 56,
-    borderRadius: 16,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginTop: 16,
-    borderWidth: 1.5,
-  },
-  secondaryLabel: {
-    fontSize: 17,
-    fontWeight: '600',
-  },
-  modePill: {
-    position: 'absolute',
-    top: 16,
-    right: 20,
-    paddingVertical: 6,
-    paddingHorizontal: 14,
-  },
-  modePillText: {
-    fontSize: 14,
-    fontWeight: '600',
+  statusText: {
+    ...tokens.type.caption,
   },
 });

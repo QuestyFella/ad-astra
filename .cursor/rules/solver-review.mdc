@@ -1,0 +1,23 @@
+---
+description: Keep solver-logic-review.md in sync when fixing solver code
+globs:
+  - native/**
+  - mobile/app/utils/solver.ts
+  - mobile/app/store/solver.ts
+  - mobile/app/store/SolverProvider.tsx
+  - mobile/modules/ad-astra-solver-native/**
+alwaysApply: false
+---
+
+# Solver review doc maintenance
+
+When implementing or fixing solver behavior in Rust (`native/`), FFI/WASM bindings, or mobile solver integration, **always update `solver-logic-review.md` in the same pass**.
+
+## Required updates
+
+1. **Findings** — For each item you touch, set **Status** (`FIXED` / `PARTIALLY FIXED` / `OPEN`) with today's date.
+2. **Implementation** — Add bullet(s) pointing to changed files and a one-line summary of the fix.
+3. **Recommended Priority** — Reorder or add items if risk or urgency changed.
+4. **Verification** — Append what you ran (tests, sweeps, manual checks) under **Verification Performed During Rescan**.
+
+Do not mark a solver fix complete without updating the review doc.

@@ -58,6 +58,18 @@ scripts/build-android-native.sh
 
 Requires Android SDK / NDK (API 34) and JDK 17.
 
+Generated solver assets (WASM glue + `default.adb`) are gitignored. Build or
+refresh them before Expo/TypeScript work:
+
+```bash
+python scripts/build_adb.py     # once, if data/processed/default.adb is missing
+scripts/prebuild-mobile-solver.sh
+# or: cd mobile && npm run prepare-solver-assets
+```
+
+`npm start`, `npm run android`, and `npm run typecheck` invoke this
+automatically via npm lifecycle hooks.
+
 ```bash
 cd mobile
 npm install

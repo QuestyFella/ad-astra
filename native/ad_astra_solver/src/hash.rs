@@ -112,9 +112,31 @@ pub fn compute_quad_hash(dist: &DistMat, bin_size: f64) -> Option<HashResult> {
         }
     }
 
-    // Project inner stars onto the baseline using the cosine rule.
-    // x = (d(A,S)^2 + baseline^2 - d(B,S)^2) / (2 * baseline^2)
-    // y = sqrt(max(0, d(A,S)^2 / baseline^2 - x^2))   (unsigned)
+    let feat_fwd = feature_for_baseline(dist, bi, bj, inner, baseline_sq)?;
+    let feat_rev = feature_for_baseline(dist, bj, bi, inner, baseline_sq)?;
+
+    let (feature, order) =
+        if feature_lex_cmp(&feat_rev.0, &feat_fwd.0) == std::cmp::Ordering::Less {
+            feat_rev
+        } else {
+            feat_fwd
+        };
+
+    let key = quantize(&feature, bin_size);
+
+    Some(HashResult { key, feature, order })
+}
+
+/// Project inner stars for a given baseline orientation and return the
+/// lexicographically sorted feature plus the point order
+/// `[baseline_A, baseline_B, inner_0, inner_1]`.
+fn feature_for_baseline(
+    dist: &DistMat,
+    bi: usize,
+    bj: usize,
+    inner: [usize; 2],
+    baseline_sq: f64,
+) -> Option<(QuadFeature, [usize; 4])> {
     let project = |s: usize| -> (f64, f64) {
         let d_as = dist[bi][s];
         let d_bs = dist[bj][s];
@@ -127,45 +149,46 @@ pub fn compute_quad_hash(dist: &DistMat, bin_size: f64) -> Option<HashResult> {
     let (x0, y0) = project(inner[0]);
     let (x1, y1) = project(inner[1]);
 
-    // Reject degenerate (collinear) quads: both inner stars on the baseline.
     if y0 < 1e-9 && y1 < 1e-9 {
         return None;
     }
 
-    // Canonicalise: sort inner stars lexicographically by (x, y).
     let (ax, ay, bx, by, inner_order) = if (x0, y0) <= (x1, y1) {
         (x0, y0, x1, y1, [inner[0], inner[1]])
     } else {
         (x1, y1, x0, y0, [inner[1], inner[0]])
     };
 
-    // Canonicalise baseline direction: the hash depends on which endpoint
-    // is "A" (bi) vs "B" (bj) because x is measured from A.  Swapping
-    // A↔B maps x → 1-x for every inner star, which can flip the inner
-    // sort order and produce a different hash key.  Since the input
-    // order of the 4 points is arbitrary (image sources vs catalog
-    // patterns may order them differently), we enforce a canonical
-    // direction: the first inner star (after sort) must have x ≤ 0.5.
-    // If it doesn't, swap the baseline endpoints and re-sort.
-    let (bi, bj, ax, ay, bx, by, inner_order) = if ax <= 0.5 {
-        (bi, bj, ax, ay, bx, by, inner_order)
-    } else {
-        // Swap baseline: x → 1-x for both inner stars; y is unchanged.
-        let (nax, nbx) = (1.0 - ax, 1.0 - bx);
-        if (nax, ay) <= (nbx, by) {
-            (bj, bi, nax, ay, nbx, by, inner_order)
-        } else {
-            (bj, bi, nbx, by, nax, ay, [inner_order[1], inner_order[0]])
-        }
-    };
-
     let feature = QuadFeature { ax, ay, bx, by };
-
-    let key = quantize(&feature, bin_size);
-
     let order = [bi, bj, inner_order[0], inner_order[1]];
+    Some((feature, order))
+}
 
-    Some(HashResult { key, feature, order })
+fn feature_lex_cmp(a: &QuadFeature, b: &QuadFeature) -> std::cmp::Ordering {
+    a.ax
+        .partial_cmp(&b.ax)
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| a.ay.partial_cmp(&b.ay).unwrap_or(std::cmp::Ordering::Equal))
+        .then_with(|| a.bx.partial_cmp(&b.bx).unwrap_or(std::cmp::Ordering::Equal))
+        .then_with(|| a.by.partial_cmp(&b.by).unwrap_or(std::cmp::Ordering::Equal))
+}
+
+/// Squared L2 distance between quantised hash keys (bin deltas).
+pub fn hash_key_dist_sq(a: &HashKey, b: &HashKey) -> i64 {
+    let dax = (a.ax as i32 - b.ax as i32) as i64;
+    let day = (a.ay as i32 - b.ay as i32) as i64;
+    let dbx = (a.bx as i32 - b.bx as i32) as i64;
+    let dby = (a.by as i32 - b.by as i32) as i64;
+    dax * dax + day * day + dbx * dbx + dby * dby
+}
+
+/// Squared L2 distance between floating-point quad features.
+pub fn quad_feature_dist_sq(a: &QuadFeature, b: &QuadFeature) -> f64 {
+    let da = a.ax - b.ax;
+    let db = a.ay - b.ay;
+    let dc = a.bx - b.bx;
+    let dd = a.by - b.by;
+    da * da + db * db + dc * dc + dd * dd
 }
 
 /// Quantise a floating-point feature into a hash key.
@@ -215,6 +238,7 @@ pub fn neighbor_keys(key: &HashKey, radius: i16) -> Vec<HashKey> {
 /// In-memory hash index mapping `HashKey` → pattern indices.
 ///
 /// Built once from the loaded database; queried O(1) per key at solve time.
+#[derive(Clone, Debug)]
 pub struct HashIndex {
     map: HashMap<HashKey, Vec<u32>>,
     pub bin_size: f64,
@@ -288,6 +312,13 @@ impl HashIndex {
     pub fn total_patterns(&self) -> usize {
         self.map.values().map(|v| v.len()).sum()
     }
+
+    /// Test-only: register a pattern under an arbitrary hash key (simulates
+    /// quantisation collisions or adversarial index ordering).
+    #[cfg(test)]
+    pub fn inject_pattern_for_test(&mut self, key: HashKey, pattern_idx: u32) {
+        self.map.entry(key).or_default().push(pattern_idx);
+    }
 }
 
 // ── Image quad generation ─────────────────────────────────────────
@@ -310,6 +341,7 @@ pub fn generate_image_quads(
     max_sources: usize,
     min_baseline_px: f64,
     bin_size: f64,
+    mut should_abort: impl FnMut() -> bool,
 ) -> Vec<ImageQuad> {
     // Sort sources by flux (brightest first), falling back to y then x.
     let mut indexed: Vec<usize> = (0..sources.len()).collect();
@@ -322,8 +354,14 @@ pub fn generate_image_quads(
     let n = indexed.len().min(max_sources);
 
     let mut quads = Vec::new();
-    for i in 0..n {
+    'quad_loop: for i in 0..n {
+        if should_abort() {
+            break 'quad_loop;
+        }
         for j in (i + 1)..n {
+            if should_abort() {
+                break 'quad_loop;
+            }
             for k in (j + 1)..n {
                 for l in (k + 1)..n {
                     let src_indices = [indexed[i], indexed[j], indexed[k], indexed[l]];
@@ -390,6 +428,51 @@ mod tests {
         assert!((result.feature.ax - 0.5).abs() < 0.01 || (result.feature.ax - 0.0).abs() < 0.01);
     }
 
+    fn all_point_permutations() -> Vec<[usize; 4]> {
+        let mut perms = Vec::with_capacity(24);
+        for a in 0..4 {
+            for b in 0..4 {
+                if b == a {
+                    continue;
+                }
+                for c in 0..4 {
+                    if c == a || c == b {
+                        continue;
+                    }
+                    for d in 0..4 {
+                        if d == a || d == b || d == c {
+                            continue;
+                        }
+                        perms.push([a, b, c, d]);
+                    }
+                }
+            }
+        }
+        perms
+    }
+
+    #[test]
+    fn test_hash_point_order_invariant() {
+        let points = [(12.0, 5.0), (88.0, 10.0), (40.0, 72.0), (55.0, 28.0)];
+        let dmat = dist_matrix_2d(&points);
+        let reference = compute_quad_hash(&dmat, 0.02).unwrap().key;
+
+        let perms = all_point_permutations();
+        assert_eq!(perms.len(), 24, "expected all 24 point permutations");
+
+        for perm in perms {
+            let permuted = [
+                points[perm[0]],
+                points[perm[1]],
+                points[perm[2]],
+                points[perm[3]],
+            ];
+            let perm_dmat = dist_matrix_2d(&permuted);
+            let key = compute_quad_hash(&perm_dmat, 0.02).unwrap().key;
+            assert_eq!(key, reference, "hash changed for permutation {:?}", perm);
+        }
+    }
+
     #[test]
     fn test_hash_degenerate() {
         // Collinear points — should return None.
@@ -442,6 +525,42 @@ mod tests {
     }
 
     #[test]
+    fn test_hash_key_dist_sq_exact_match() {
+        let key = HashKey {
+            ax: 10,
+            ay: 20,
+            bx: 30,
+            by: 40,
+        };
+        assert_eq!(hash_key_dist_sq(&key, &key), 0);
+        let neighbor = HashKey {
+            ax: 11,
+            ay: 20,
+            bx: 30,
+            by: 40,
+        };
+        assert_eq!(hash_key_dist_sq(&key, &neighbor), 1);
+    }
+
+    #[test]
+    fn test_quad_feature_dist_sq() {
+        let a = QuadFeature {
+            ax: 0.1,
+            ay: 0.2,
+            bx: 0.3,
+            by: 0.4,
+        };
+        let b = QuadFeature {
+            ax: 0.2,
+            ay: 0.3,
+            bx: 0.4,
+            by: 0.5,
+        };
+        let dist = quad_feature_dist_sq(&a, &b);
+        assert!(approx(dist, 0.04));
+    }
+
+    #[test]
     fn test_quantize_clamps() {
         let feature = QuadFeature {
             ax: 1e6,
@@ -464,10 +583,30 @@ mod tests {
             })
             .collect();
 
-        let quads = generate_image_quads(&sources, 10, 5.0, 0.02);
+        let quads = generate_image_quads(&sources, 10, 5.0, 0.02, || false);
         // C(10, 4) = 210 combinations; some may be filtered by min_baseline.
         assert!(!quads.is_empty());
         assert!(quads.len() <= 210);
+    }
+
+    #[test]
+    fn test_generate_image_quads_respects_abort() {
+        let sources: Vec<ImageSource> = (0..25)
+            .map(|i| ImageSource {
+                x_px: i as f64 * 10.0,
+                y_px: (i as f64 % 5.0) * 10.0,
+                flux: Some(25.0 - i as f64),
+            })
+            .collect();
+
+        let full = generate_image_quads(&sources, 25, 5.0, 0.02, || false);
+        let mut checks = 0usize;
+        let partial = generate_image_quads(&sources, 25, 5.0, 0.02, || {
+            checks += 1;
+            checks > 3
+        });
+        assert!(!full.is_empty());
+        assert!(partial.len() < full.len());
     }
 
     use std::io::Write;

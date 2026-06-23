@@ -8,6 +8,9 @@
 
 import * as fs from "fs";
 import * as path from "path";
+import { fileURLToPath } from "url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 let passed = 0;
 let failed = 0;
@@ -16,8 +19,8 @@ function assert(cond: boolean, msg: string) {
   if (!cond) throw new Error(msg);
 }
 
-const MOBILE_DIR = path.resolve(__dirname);
-const WASM_PATH = path.resolve(MOBILE_DIR, "..", "app", "wasm", "ad_astra_solver_wasm_bg.wasm");
+const MOBILE_DIR = path.resolve(__dirname, "..");
+const WASM_PATH = path.resolve(MOBILE_DIR, "app", "wasm", "ad_astra_solver_wasm_bg.wasm");
 
 // Build a tiny .adb database in memory for WASM testing
 function buildTinyDb(): Uint8Array {
@@ -101,18 +104,98 @@ async function main() {
 
   await runTest("WASM module loads", async () => {
     const wasmBin = fs.readFileSync(WASM_PATH);
-    const response = new Response(wasmBin, {
-      headers: { "Content-Type": "application/wasm" },
-    });
     mod = await import("../app/wasm/ad_astra_solver_wasm.js");
-    await mod.default(response);
+    await mod.default({ module_or_path: wasmBin });
     assert(typeof mod.solve === "function", "solve() export missing");
+    assert(typeof mod.prepare_database === "function", "prepare_database() export missing");
+    assert(typeof mod.solve_loaded === "function", "solve_loaded() export missing");
   });
 
   await runTest("tiny database built and accepted", () => {
     dbBytes = buildTinyDb();
     assert(dbBytes.length > 64, `db too small: ${dbBytes.length}B`);
     console.log(`    Generated ${dbBytes.length}B test database`);
+  });
+
+  await runTest("solve_loaded without prepare_database → error", () => {
+    const resultJson = mod.solve_loaded(JSON.stringify([]), 100, 100);
+    const result = JSON.parse(resultJson);
+    assert(result.success === false, "expected failure without prepare_database");
+    assert(
+      result.log[0].includes("Database not prepared"),
+      `unexpected log: ${result.log[0]}`
+    );
+  });
+
+  await runTest("prepare_database + solve_loaded reuse prepared index", () => {
+    const prepJson = mod.prepare_database(dbBytes);
+    const prep = JSON.parse(prepJson);
+    assert(prep.success === true, `prepare failed: ${prepJson}`);
+    assert(prep.stars === 10, `expected 10 stars, got ${prep.stars}`);
+    assert(prep.patterns === 3, `expected 3 patterns, got ${prep.patterns}`);
+
+    const sources = [
+      { x_px: 100, y_px: 200, flux: 1.0 },
+      { x_px: 300, y_px: 400, flux: 0.5 },
+    ];
+    const firstJson = mod.solve_loaded(JSON.stringify(sources), 800, 600);
+    const first = JSON.parse(firstJson);
+    assert(typeof first.success === "boolean", "first solve_loaded missing success");
+    assert(Array.isArray(first.log), "first solve_loaded missing log");
+
+    const secondJson = mod.solve_loaded(JSON.stringify([]), 400, 300);
+    const second = JSON.parse(secondJson);
+    assert(typeof second.success === "boolean", "second solve_loaded missing success");
+    assert(second.log.some((line: string) => line.includes("Input: 0 sources")), "second solve should report empty input");
+  });
+
+  await runTest("consecutive solve_loaded calls reuse prepared index", () => {
+    const prep = JSON.parse(mod.prepare_database(dbBytes));
+    assert(prep.success === true, `prepare failed: ${JSON.stringify(prep)}`);
+
+    const payloads = [
+      { sources: [{ x_px: 50, y_px: 60, flux: 1.0 }], w: 320, h: 240 },
+      { sources: [{ x_px: 120, y_px: 80, flux: 0.8 }, { x_px: 200, y_px: 140, flux: 0.6 }], w: 640, h: 480 },
+      { sources: [], w: 800, h: 600 },
+    ];
+
+    for (const [index, payload] of payloads.entries()) {
+      const resultJson = mod.solve_loaded(
+        JSON.stringify({ sources: payload.sources }),
+        payload.w,
+        payload.h,
+      );
+      const result = JSON.parse(resultJson);
+      assert(typeof result.success === "boolean", `solve ${index + 1} missing success`);
+      assert(Array.isArray(result.log), `solve ${index + 1} missing log`);
+      assert(
+        result.log.some((line: string) => line.includes("Hash index ready")),
+        `solve ${index + 1} should reuse prepared hash index`,
+      );
+    }
+  });
+
+  await runTest("solve_loaded honors solve_timeout_ms budget", () => {
+    const prep = JSON.parse(mod.prepare_database(dbBytes));
+    assert(prep.success === true, `prepare failed: ${JSON.stringify(prep)}`);
+
+    const manySources = Array.from({ length: 25 }, (_, i) => ({
+      x_px: 20 + (i % 5) * 40,
+      y_px: 20 + Math.floor(i / 5) * 40,
+      flux: 25 - i,
+    }));
+
+    const resultJson = mod.solve_loaded(
+      JSON.stringify({ sources: manySources, solve_timeout_ms: 1 }),
+      800,
+      600,
+    );
+    const result = JSON.parse(resultJson);
+    assert(result.success === false, "1ms timeout should fail the solve");
+    assert(
+      result.log.some((line: string) => line.toLowerCase().includes("timed out")),
+      `expected timeout log, got: ${result.log.join(" | ")}`,
+    );
   });
 
   await runTest("solve with empty sources → returns valid result struct", () => {

@@ -5,6 +5,7 @@ import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { Text } from 'react-native';
 import type { ThemeMode } from '../theme/colors';
 import { getTheme } from '../theme/colors';
+import { tokens } from '../theme/tokens';
 import type {
   HomeStackParamList,
   AboutStackParamList,
@@ -15,14 +16,15 @@ import { HomeScreen } from '../screens/HomeScreen';
 import { SolvingScreen } from '../screens/SolvingScreen';
 import { ResultScreen } from '../screens/ResultScreen';
 import { AboutScreen } from '../screens/AboutScreen';
+import { SolverProvider } from '../store/SolverProvider';
 
 export const ThemeContext = createContext<{
   theme: ThemeMode;
   nightMode: boolean;
   setNightMode: (v: boolean) => void;
 }>({
-  theme: 'night',
-  nightMode: true,
+  theme: 'light',
+  nightMode: false,
   setNightMode: () => {},
 });
 
@@ -32,11 +34,13 @@ const Tab = createBottomTabNavigator<TabParamList>();
 
 function HomeStackScreen() {
   return (
-    <HomeStack.Navigator screenOptions={{ headerShown: false }}>
-      <HomeStack.Screen name="HomeMain" component={HomeScreen} />
-      <HomeStack.Screen name="Solving" component={SolvingScreen} />
-      <HomeStack.Screen name="Result" component={ResultScreen} />
-    </HomeStack.Navigator>
+    <SolverProvider>
+      <HomeStack.Navigator screenOptions={{ headerShown: false }}>
+        <HomeStack.Screen name="HomeMain" component={HomeScreen} />
+        <HomeStack.Screen name="Solving" component={SolvingScreen} />
+        <HomeStack.Screen name="Result" component={ResultScreen} />
+      </HomeStack.Navigator>
+    </SolverProvider>
   );
 }
 
@@ -49,8 +53,8 @@ function AboutStackScreen() {
 }
 
 export function AppNavigator() {
-  const [nightMode, setNightMode] = useState(true);
-  const theme: ThemeMode = nightMode ? 'night' : 'day';
+  const [nightMode, setNightMode] = useState(false);
+  const theme: ThemeMode = nightMode ? 'dark' : 'light';
   const t = getTheme(theme);
 
   return (
@@ -60,18 +64,20 @@ export function AppNavigator() {
           screenOptions={{
             headerShown: false,
             tabBarStyle: {
-              backgroundColor: t.card,
-              borderTopColor: t.cardBorder,
+              backgroundColor: t.canvasSoft,
               borderTopWidth: 1,
+              borderTopColor: 'rgba(0, 0, 0, 0.08)',
               height: 64,
               paddingBottom: 10,
               paddingTop: 6,
             },
-            tabBarActiveTintColor: t.accent,
+            tabBarActiveTintColor: t.primary,
             tabBarInactiveTintColor: t.textMuted,
             tabBarLabelStyle: {
-              fontSize: 12,
-              fontWeight: '600',
+              fontFamily: tokens.font.text,
+              fontSize: 11,
+              fontWeight: '400',
+              letterSpacing: -0.12,
             },
           }}
         >

@@ -2,10 +2,11 @@ import React from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import type { SolveResult } from '../types/solver';
 import type { Theme } from '../theme/colors';
+import { tokens } from '../theme/tokens';
 
 interface CoordinateReadoutProps {
   result: SolveResult;
-  theme: Theme;
+  theme?: Theme;
 }
 
 function degToRA(deg: number): string {
@@ -22,7 +23,11 @@ function degToDec(deg: number): string {
   const d = Math.floor(abs);
   const m = Math.floor((abs - d) * 60);
   const s = ((abs - d) * 60 - m) * 60;
-  return `${sign}${String(d).padStart(2, '0')}° ${String(m).padStart(2, '0')}' ${s.toFixed(1).padStart(4, '0')}"`;
+  return `${sign}${String(d).padStart(2, '0')}° ${String(m).padStart(2, '0')}′ ${s.toFixed(1).padStart(4, '0')}″`;
+}
+
+function rowColor(t: Theme, which: 'label' | 'value') {
+  return which === 'label' ? t.textMuted : t.ink;
 }
 
 export function CoordinateReadout({ result, theme }: CoordinateReadoutProps) {
@@ -30,53 +35,72 @@ export function CoordinateReadout({ result, theme }: CoordinateReadoutProps) {
     return null;
   }
 
-  const t = theme;
+  const t = theme!;
 
   return (
-    <View style={styles.container}>
-      <View style={styles.row}>
-        <Text style={[styles.label, { color: t.textMuted }]}>Right Ascension</Text>
-        <Text style={[styles.value, { color: t.text }]}>{degToRA(result.raDeg)}</Text>
-      </View>
-      <View style={[styles.row, { borderTopColor: t.cardBorder }]}>
-        <Text style={[styles.label, { color: t.textMuted }]}>Declination</Text>
-        <Text style={[styles.value, { color: t.text }]}>{degToDec(result.decDeg)}</Text>
-      </View>
-      <View style={[styles.row, { borderTopColor: t.cardBorder }]}>
-        <Text style={[styles.label, { color: t.textMuted }]}>Field of View</Text>
-        <Text style={[styles.value, { color: t.text }]}>
-          {result.fovXDeg != null && result.fovYDeg != null
-            ? `${result.fovXDeg.toFixed(1)}° × ${result.fovYDeg.toFixed(1)}°`
-            : '—'}
-        </Text>
-      </View>
-      <View style={[styles.row, { borderTopColor: t.cardBorder }]}>
-        <Text style={[styles.label, { color: t.textMuted }]}>Rotation</Text>
-        <Text style={[styles.value, { color: t.text }]}>
-          {result.rotationDeg != null ? `${result.rotationDeg.toFixed(1)}°` : '—'}
-        </Text>
-      </View>
+    <View>
+      <Row label="Right Ascension" value={degToRA(result.raDeg)} t={t} />
+      <Row label="Declination" value={degToDec(result.decDeg)} t={t} top />
+      <Row
+        label="Field of View"
+        value={
+          result.fovXDeg != null && result.fovYDeg != null
+            ? `${result.fovXDeg.toFixed(2)}° × ${result.fovYDeg.toFixed(2)}°`
+            : '—'
+        }
+        t={t}
+        top
+      />
+      <Row
+        label="Rotation"
+        value={result.rotationDeg != null ? `${result.rotationDeg.toFixed(2)}°` : '—'}
+        t={t}
+        top
+      />
+    </View>
+  );
+}
+
+function Row({
+  label,
+  value,
+  t,
+  top,
+}: {
+  label: string;
+  value: string;
+  t: Theme;
+  top?: boolean;
+}) {
+  return (
+    <View
+      style={[
+        styles.row,
+        { borderTopColor: t.hairline, borderTopWidth: top ? 1 : 0 },
+      ]}
+    >
+      <Text style={[styles.label, { color: rowColor(t, 'label') }]}>
+        {label}
+      </Text>
+      <Text style={[styles.value, { color: rowColor(t, 'value') }]}>
+        {value}
+      </Text>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    overflow: 'hidden',
-  },
   row: {
-    paddingVertical: 16,
-    borderTopWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
     alignItems: 'center',
+    paddingVertical: tokens.space.md,
   },
   label: {
-    fontSize: 13,
-    fontWeight: '600',
-    marginBottom: 6,
+    ...tokens.type.caption,
   },
   value: {
-    fontSize: 22,
-    fontWeight: '700',
-    letterSpacing: 0.3,
+    ...tokens.type.bodyStrong,
+    fontFamily: tokens.font.mono,
   },
 });

@@ -9,12 +9,16 @@
 //!    matched stars.
 //! 6. Return the best solution (RA/Dec/FOV/roll + overlay data).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::db;
+use crate::db::{self, PreparedDatabase};
 use crate::geometry::{Affine2D, RadialQuad2D, TangentPlane, Vec3};
-use crate::hash::{generate_image_quads, compute_quad_hash, dist_matrix_3d, HashIndex, ImageQuad};
+use crate::hash::{
+    generate_image_quads, compute_quad_hash, dist_matrix_3d, hash_key_dist_sq,
+    quad_feature_dist_sq, HashIndex, ImageQuad,
+};
 use crate::types::{DetectedStar, ImageSource, MatchedStarInfo, SolveResult, SolveSourcesRequest};
 
 // ═══ Platform-adaptive timer ═══
@@ -33,13 +37,75 @@ fn timer_now() -> Timer { Instant::now() }
 fn timer_elapsed(t: &Timer) -> u64 { t.elapsed().as_millis() as u64 }
 
 #[cfg(target_arch = "wasm32")]
-type Timer = u64;
+type Timer = f64;
 
 #[cfg(target_arch = "wasm32")]
-fn timer_now() -> Timer { 0u64 }
+fn timer_now() -> Timer {
+    js_sys::Date::now()
+}
 
 #[cfg(target_arch = "wasm32")]
-fn timer_elapsed(_t: &Timer) -> u64 { 0 }
+fn timer_elapsed(t: &Timer) -> u64 {
+    (js_sys::Date::now() - *t).max(0.0) as u64
+}
+
+static SOLVE_CANCELLED: AtomicBool = AtomicBool::new(false);
+
+/// Request cooperative cancellation of the in-flight solve (JNI/mobile cancel).
+pub fn request_solve_cancel() {
+    SOLVE_CANCELLED.store(true, Ordering::Relaxed);
+}
+
+/// Clear the cancellation flag (call at the start of each solve).
+pub fn clear_solve_cancel() {
+    SOLVE_CANCELLED.store(false, Ordering::Relaxed);
+}
+
+/// True when a client has requested cancellation of the current solve.
+pub fn is_solve_cancelled() -> bool {
+    SOLVE_CANCELLED.load(Ordering::Relaxed)
+}
+
+fn is_timed_out(start: &Timer, timeout_ms: Option<f64>) -> bool {
+    match timeout_ms {
+        Some(limit) if limit > 0.0 => timer_elapsed(start) as f64 >= limit,
+        _ => false,
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AbortKind {
+    Cancelled,
+    TimedOut,
+}
+
+fn check_abort(start: &Timer, timeout_ms: Option<f64>) -> Option<AbortKind> {
+    if is_solve_cancelled() {
+        Some(AbortKind::Cancelled)
+    } else if is_timed_out(start, timeout_ms) {
+        Some(AbortKind::TimedOut)
+    } else {
+        None
+    }
+}
+
+fn abort_log_message(kind: AbortKind, stage: &str) -> String {
+    match kind {
+        AbortKind::Cancelled => format!("Solve cancelled by client {stage}"),
+        AbortKind::TimedOut => format!("Solve timed out {stage}"),
+    }
+}
+
+fn fov_within_estimate(
+    fov_x_deg: f32,
+    fov_y_deg: f32,
+    estimate_deg: f32,
+    max_error_deg: Option<f32>,
+) -> bool {
+    let computed = fov_x_deg.max(fov_y_deg);
+    let tolerance = max_error_deg.unwrap_or(estimate_deg);
+    (computed - estimate_deg).abs() <= tolerance
+}
 
 /// Maximum number of brightest sources used for quad generation.
 const MAX_SOURCES_FOR_QUADS: usize = 25;
@@ -53,6 +119,9 @@ const HASH_NEIGHBOR_RADIUS: i16 = 1;
 /// Maximum catalog patterns to test per image quad.
 /// Prevents combinatorial explosion on dense hash bins.
 const MAX_CANDIDATES_PER_QUAD: usize = 50;
+
+/// Maximum candidates passed to verification across all image quads.
+const MAX_GLOBAL_CANDIDATES: usize = 2000;
 
 /// RMS matching threshold (arcseconds) for a star to count as "verified".
 ///
@@ -138,12 +207,42 @@ struct Candidate {
     tangent_plane: TangentPlane,
 }
 
+/// Ranking metadata used before verification caps are applied.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CandidateScore {
+    feature_dist_sq: f64,
+    key_dist_sq: i64,
+    /// Sum of source flux for the image quad (higher is better).
+    quad_quality: f64,
+}
+
+impl CandidateScore {
+    fn cmp_key(self, other: Self) -> std::cmp::Ordering {
+        self.feature_dist_sq
+            .partial_cmp(&other.feature_dist_sq)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| self.key_dist_sq.cmp(&other.key_dist_sq))
+            .then_with(|| {
+                other
+                    .quad_quality
+                    .partial_cmp(&self.quad_quality)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    }
+
+    fn is_better_than(self, other: Self) -> bool {
+        self.cmp_key(other) == std::cmp::Ordering::Less
+    }
+}
+
 /// A verified solution candidate.
 struct VerifiedSolution {
     matched_stars: u32,
     rms_arcsec: f64,
     transform: RadialQuad2D,
     tangent_plane: TangentPlane,
+    /// True when verification used a mirrored η tangent plane.
+    reflect_y: bool,
     matched: Vec<MatchedStarInfo>,
 }
 
@@ -163,15 +262,18 @@ pub fn solve_sources(request: &SolveSourcesRequest) -> SolveResult {
         }
     };
 
-    solve_sources_with_db(request, db, &db_id)
+    let prepared = PreparedDatabase::from_database(db);
+    solve_prepared(request, &prepared, &db_id)
 }
 
-/// Solve using an already-loaded database (useful for WASM / mobile).
-pub fn solve_sources_with_db(
+/// Solve using a database with a pre-built hash index.
+pub fn solve_prepared(
     request: &SolveSourcesRequest,
-    db: db::AdbDatabase,
+    prepared: &PreparedDatabase,
     db_id: &str,
 ) -> SolveResult {
+    let db = &prepared.db;
+    let hash_index = &prepared.hash_index;
     let start = timer_now();
     let mut log: Vec<String> = Vec::new();
 
@@ -181,13 +283,9 @@ pub fn solve_sources_with_db(
         db.header.min_fov_deg, db.header.max_fov_deg, db.header.max_mag
     ));
 
-    // ── 2. Build hash index ────────────────────────────────────────
-    let hash_index = HashIndex::build(&db);
     log.push(format!(
-        "Hash index built: {} patterns in {} bins (bin_size={:.4})",
+        "Hash index ready: {} patterns (bin_size={:.4})",
         hash_index.total_patterns(),
-        // Count unique bins
-        0, // (not essential to compute)
         hash_index.bin_size
     ));
 
@@ -214,14 +312,35 @@ pub fn solve_sources_with_db(
         return result;
     }
 
+    if let Some(kind) = check_abort(&start, request.solve_timeout_ms) {
+        log.push(abort_log_message(kind, "before quad generation."));
+        let elapsed = timer_elapsed(&start);
+        let mut result = SolveResult::failure(log);
+        result.database_id = Some(db_id.to_string());
+        result.solve_time_ms = elapsed;
+        result.detected_stars = detected_stars;
+        return result;
+    }
+
     // ── 3. Generate image quads ────────────────────────────────────
     let image_quads = generate_image_quads(
         &request.sources,
         MAX_SOURCES_FOR_QUADS,
         MIN_BASELINE_PX,
         hash_index.bin_size,
+        || check_abort(&start, request.solve_timeout_ms).is_some(),
     );
     log.push(format!("Generated {} image quads", image_quads.len()));
+
+    if let Some(kind) = check_abort(&start, request.solve_timeout_ms) {
+        log.push(abort_log_message(kind, "after quad generation."));
+        let elapsed = timer_elapsed(&start);
+        let mut result = SolveResult::failure(log);
+        result.database_id = Some(db_id.to_string());
+        result.solve_time_ms = elapsed;
+        result.detected_stars = detected_stars;
+        return result;
+    }
 
     if image_quads.is_empty() {
         let elapsed = timer_elapsed(&start);
@@ -233,9 +352,26 @@ pub fn solve_sources_with_db(
     }
 
     // ── 4. Find candidates ────────────────────────────────────────
-    let mut candidates = find_candidates(&image_quads, &hash_index, &db);
+    let candidates = find_candidates(
+        &image_quads,
+        hash_index,
+        db,
+        &request.sources,
+        &start,
+        request.solve_timeout_ms,
+    );
 
     log.push(format!("Found {} candidates", candidates.len()));
+
+    if let Some(kind) = check_abort(&start, request.solve_timeout_ms) {
+        log.push(abort_log_message(kind, "during candidate lookup."));
+        let elapsed = timer_elapsed(&start);
+        let mut result = SolveResult::failure(log);
+        result.database_id = Some(db_id.to_string());
+        result.solve_time_ms = elapsed;
+        result.detected_stars = detected_stars;
+        return result;
+    }
 
     if candidates.is_empty() {
         let elapsed = timer_elapsed(&start);
@@ -246,20 +382,27 @@ pub fn solve_sources_with_db(
         return result;
     }
 
-    // Limit total candidates to prevent pathological blowup.
-    if candidates.len() > 2000 {
-        candidates.truncate(2000);
-    }
-
     // ── 5. Verify candidates ───────────────────────────────────────
-    let best = verify_candidates(&candidates, &request.sources, &db);
+    let best = verify_candidates(
+        &candidates,
+        &request.sources,
+        &db,
+        &start,
+        request.solve_timeout_ms,
+    );
 
     match &best {
         Some(sol) => log.push(format!(
             "Best verified solution: {} matched stars, rms={:.1} arcsec",
             sol.matched_stars, sol.rms_arcsec
         )),
-        None => log.push("No candidates verified successfully.".to_string()),
+        None => {
+            if let Some(kind) = check_abort(&start, request.solve_timeout_ms) {
+                log.push(abort_log_message(kind, "during candidate verification."));
+            } else {
+                log.push("No candidates verified successfully.".to_string());
+            }
+        }
     }
 
     if best.is_none() {
@@ -271,26 +414,88 @@ pub fn solve_sources_with_db(
         return result;
     }
 
+    if let Some(kind) = check_abort(&start, request.solve_timeout_ms) {
+        log.push(abort_log_message(kind, "after candidate verification."));
+        let elapsed = timer_elapsed(&start);
+        let mut result = SolveResult::failure(log);
+        result.database_id = Some(db_id.to_string());
+        result.solve_time_ms = elapsed;
+        result.detected_stars = detected_stars;
+        return result;
+    }
+
     let solution = best.unwrap();
 
     // ── 6. Compute final plate solution ────────────────────────────
+    let (fov_x_deg, fov_y_deg) = match crate::geometry::image_angular_fov_deg(
+        &solution.transform,
+        &solution.tangent_plane,
+        request.image_width_px,
+        request.image_height_px,
+        solution.reflect_y,
+    ) {
+        Some(fov) => fov,
+        None => {
+            log.push("Could not compute angular FOV from image edges.".to_string());
+            let elapsed = timer_elapsed(&start);
+            let mut result = SolveResult::failure(log);
+            result.database_id = Some(db_id.to_string());
+            result.solve_time_ms = elapsed;
+            result.detected_stars = detected_stars;
+            return result;
+        }
+    };
+    let pixel_scale_arcsec = (
+        (fov_x_deg / request.image_width_px as f64)
+            + (fov_y_deg / request.image_height_px as f64)
+    ) / 2.0 * 3600.0;
+
     let (ra_deg, dec_deg) = image_center_to_radec(
         &solution.transform,
         &solution.tangent_plane,
         request.image_width_px,
         request.image_height_px,
+        solution.reflect_y,
     );
 
-    // The transform maps image pixels to tangent-plane coordinates
-    // (in radians).  scale() returns the norm of the column vector (a, e),
-    // which is the average pixel scale in radians/pixel.
-    let affine_part = solution.transform.affine_part();
-    let pixel_scale_arcsec = affine_part.scale().to_degrees() * 3600.0;
+    if let Some(fov_est) = request.fov_estimate_deg {
+        if !fov_within_estimate(
+            fov_x_deg as f32,
+            fov_y_deg as f32,
+            fov_est,
+            request.fov_max_error_deg,
+        ) {
+            let tolerance = request.fov_max_error_deg.unwrap_or(fov_est);
+            log.push(format!(
+                "Computed FOV {:.1}°×{:.1}° outside estimate {:.1}° ± {:.1}°",
+                fov_x_deg, fov_y_deg, fov_est, tolerance
+            ));
+            let elapsed = timer_elapsed(&start);
+            let mut result = SolveResult::failure(log);
+            result.database_id = Some(db_id.to_string());
+            result.solve_time_ms = elapsed;
+            result.detected_stars = detected_stars;
+            return result;
+        }
+    }
 
-    let fov_x_deg = pixel_scale_arcsec * request.image_width_px as f64 / 3600.0;
-    let fov_y_deg = pixel_scale_arcsec * request.image_height_px as f64 / 3600.0;
+    let computed_fov = fov_x_deg.max(fov_y_deg);
+    if computed_fov < db.header.min_fov_deg as f64
+        || computed_fov > db.header.max_fov_deg as f64
+    {
+        log.push(format!(
+            "Computed FOV {:.1}°×{:.1}° outside database range {:.1}-{:.1}°",
+            fov_x_deg, fov_y_deg, db.header.min_fov_deg, db.header.max_fov_deg
+        ));
+        let elapsed = timer_elapsed(&start);
+        let mut result = SolveResult::failure(log);
+        result.database_id = Some(db_id.to_string());
+        result.solve_time_ms = elapsed;
+        result.detected_stars = detected_stars;
+        return result;
+    }
 
-    let roll_deg = affine_part.rotation_deg();
+    let roll_deg = solution.transform.affine_part().rotation_deg();
 
     // Confidence: based on matched star count and RMS error.
     let confidence: f32 = if solution.matched_stars >= 8
@@ -326,13 +531,44 @@ pub fn solve_sources_with_db(
     result
 }
 
+/// Solve using an already-loaded database (builds hash index each call).
+pub fn solve_sources_with_db(
+    request: &SolveSourcesRequest,
+    db: db::AdbDatabase,
+    db_id: &str,
+) -> SolveResult {
+    let prepared = PreparedDatabase::from_database(db);
+    solve_prepared(request, &prepared, db_id)
+}
+
+/// Sum of source flux for the stars in an image quad (brightest-first tie-break).
+fn image_quad_quality(sources: &[ImageSource], order: &[usize; 4]) -> f64 {
+    order
+        .iter()
+        .map(|&idx| sources[idx].flux.unwrap_or(0.0))
+        .sum()
+}
+
+/// Rank and cap a scored candidate list (lower `CandidateScore` is better).
+fn sort_and_cap_candidates(
+    mut ranked: Vec<(Candidate, CandidateScore)>,
+    cap: usize,
+) -> Vec<(Candidate, CandidateScore)> {
+    ranked.sort_by(|(_, a), (_, b)| a.cmp_key(*b));
+    ranked.truncate(cap);
+    ranked
+}
+
 /// find candidate image↔catalog matches by hash lookup.
 fn find_candidates(
     image_quads: &[ImageQuad],
     hash_index: &HashIndex,
     db: &db::AdbDatabase,
+    sources: &[ImageSource],
+    start: &Timer,
+    timeout_ms: Option<f64>,
 ) -> Vec<Candidate> {
-    let mut candidates = Vec::new();
+    let mut ranked: Vec<(Candidate, CandidateScore)> = Vec::new();
 
     // Pre-fetch catalog star unit vectors once.
     let cat_star_vecs: Vec<Vec3> = db
@@ -342,14 +578,17 @@ fn find_candidates(
         .collect();
 
     for img_quad in image_quads {
-        let hits = hash_index.get_with_neighbors(&img_quad.hash, HASH_NEIGHBOR_RADIUS);
-        let mut count = 0;
-        for (pattern_idx, _matched_key) in hits {
-            if count >= MAX_CANDIDATES_PER_QUAD {
-                break;
-            }
-            count += 1;
+        if check_abort(start, timeout_ms).is_some() {
+            break;
+        }
 
+        let quad_quality = image_quad_quality(sources, &img_quad.order);
+        let hits = hash_index.get_with_neighbors(&img_quad.hash, HASH_NEIGHBOR_RADIUS);
+
+        // Deduplicate by catalog pattern, keeping the best hash match.
+        let mut best_by_pattern: HashMap<u32, CandidateScore> = HashMap::new();
+
+        for (pattern_idx, matched_key) in hits {
             let pattern = &db.patterns[pattern_idx as usize];
             let star_idx = pattern.star_indices;
             if star_idx.iter().any(|&i| i as usize >= cat_star_vecs.len()) {
@@ -363,18 +602,48 @@ fn find_candidates(
                 cat_star_vecs[star_idx[3] as usize],
             ];
 
-            // Re-compute the catalog quad hash to get the canonical ordering.
             let dmat = dist_matrix_3d(&cat_vecs);
             let cat_hash = match compute_quad_hash(&dmat, hash_index.bin_size) {
                 Some(h) => h,
                 None => continue,
             };
 
-            // Set up tangent plane at the centroid of the 4 catalog stars.
+            let score = CandidateScore {
+                feature_dist_sq: quad_feature_dist_sq(&img_quad.feature, &cat_hash.feature),
+                key_dist_sq: hash_key_dist_sq(&img_quad.hash, &matched_key),
+                quad_quality,
+            };
+
+            best_by_pattern
+                .entry(pattern_idx)
+                .and_modify(|existing| {
+                    if score.is_better_than(*existing) {
+                        *existing = score;
+                    }
+                })
+                .or_insert(score);
+        }
+
+        let mut quad_ranked: Vec<(Candidate, CandidateScore)> = Vec::new();
+
+        for (pattern_idx, score) in best_by_pattern {
+            let pattern = &db.patterns[pattern_idx as usize];
+            let star_idx = pattern.star_indices;
+            let cat_vecs = [
+                cat_star_vecs[star_idx[0] as usize],
+                cat_star_vecs[star_idx[1] as usize],
+                cat_star_vecs[star_idx[2] as usize],
+                cat_star_vecs[star_idx[3] as usize],
+            ];
+
+            let dmat = dist_matrix_3d(&cat_vecs);
+            let cat_hash = match compute_quad_hash(&dmat, hash_index.bin_size) {
+                Some(h) => h,
+                None => continue,
+            };
+
             let center = centroid(&cat_vecs);
             let tangent_plane = TangentPlane::at(center);
-
-            // Reorder catalog vectors to match the hash order.
             let cat_reordered_vecs = [
                 cat_vecs[cat_hash.order[0]],
                 cat_vecs[cat_hash.order[1]],
@@ -382,20 +651,28 @@ fn find_candidates(
                 cat_vecs[cat_hash.order[3]],
             ];
 
-            candidates.push(Candidate {
-                image_quad: ImageQuad {
-                    order: img_quad.order,
-                    points: img_quad.points,
-                    hash: img_quad.hash,
-                    feature: img_quad.feature,
+            quad_ranked.push((
+                Candidate {
+                    image_quad: ImageQuad {
+                        order: img_quad.order,
+                        points: img_quad.points,
+                        hash: img_quad.hash,
+                        feature: img_quad.feature,
+                    },
+                    cat_vecs: cat_reordered_vecs,
+                    tangent_plane,
                 },
-                cat_vecs: cat_reordered_vecs,
-                tangent_plane,
-            });
+                score,
+            ));
         }
+
+        ranked.extend(sort_and_cap_candidates(quad_ranked, MAX_CANDIDATES_PER_QUAD));
     }
 
-    candidates
+    sort_and_cap_candidates(ranked, MAX_GLOBAL_CANDIDATES)
+        .into_iter()
+        .map(|(candidate, _)| candidate)
+        .collect()
 }
 
 /// Try all 4 correspondence permutations and verify each one.
@@ -405,17 +682,41 @@ fn verify_candidates(
     candidates: &[Candidate],
     sources: &[ImageSource],
     db: &db::AdbDatabase,
+    start: &Timer,
+    timeout_ms: Option<f64>,
 ) -> Option<VerifiedSolution> {
     let mut best: Option<VerifiedSolution> = None;
+    let mut should_abort = || check_abort(start, timeout_ms).is_some();
 
     // For each candidate, we use its own tangent plane (centered at the
     // field centroid), so projection is correct for that region.
 
     for candidate in candidates {
+        if should_abort() {
+            break;
+        }
+
         for &swap_baseline in &[false, true] {
+            if should_abort() {
+                break;
+            }
             for &swap_inner in &[false, true] {
+                if should_abort() {
+                    break;
+                }
                 for &reflect_y in &[false, true] {
-                    if let Some(sol) = verify_single(candidate, sources, db, swap_baseline, swap_inner, reflect_y) {
+                    if should_abort() {
+                        break;
+                    }
+                    if let Some(sol) = verify_single(
+                        candidate,
+                        sources,
+                        db,
+                        swap_baseline,
+                        swap_inner,
+                        reflect_y,
+                        &mut should_abort,
+                    ) {
                         let is_better = match &best {
                             None => true,
                             Some(existing) => {
@@ -433,7 +734,73 @@ fn verify_candidates(
         }
     }
 
+    if check_abort(start, timeout_ms).is_some() {
+        return None;
+    }
+
     best
+}
+
+/// Match image sources to catalog stars one-to-one within `threshold_rad`.
+fn match_sources_one_to_one(
+    sources: &[ImageSource],
+    apply: impl Fn(f64, f64) -> (f64, f64),
+    grid: &CatalogGrid,
+    cat_tangent_all: &[(f64, f64)],
+    db: &db::AdbDatabase,
+    threshold_rad: f64,
+) -> (Vec<(MatchedStarInfo, usize)>, f64) {
+    let threshold_sq = threshold_rad * threshold_rad;
+    let mut pair_candidates: Vec<(usize, usize, f64)> = Vec::new();
+
+    for (si, s) in sources.iter().enumerate() {
+        let (xi, eta) = apply(s.x_px, s.y_px);
+        if let Some((best_j, dist_sq)) =
+            grid.nearest_within(cat_tangent_all, xi, eta, threshold_rad)
+        {
+            if dist_sq <= threshold_sq {
+                pair_candidates.push((si, best_j, dist_sq));
+            }
+        }
+    }
+
+    pair_candidates.sort_by(|a, b| {
+        a.2.partial_cmp(&b.2)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut used_sources = HashSet::new();
+    let mut used_catalog = HashSet::new();
+    let mut matched = Vec::new();
+    let mut rms_sum_sq = 0.0;
+
+    for (si, cat_j, dist_sq) in pair_candidates {
+        if used_sources.contains(&si) || used_catalog.contains(&cat_j) {
+            continue;
+        }
+        used_sources.insert(si);
+        used_catalog.insert(cat_j);
+
+        let s = &sources[si];
+        let star = &db.stars[cat_j];
+        rms_sum_sq += dist_sq;
+        let (ra, dec) = (
+            (star.ra_rad as f64).to_degrees().rem_euclid(360.0),
+            (star.dec_rad as f64).to_degrees(),
+        );
+        matched.push((
+            MatchedStarInfo {
+                image_x: s.x_px,
+                image_y: s.y_px,
+                catalog_id: star.catalog_id,
+                ra_deg: ra,
+                dec_deg: dec,
+            },
+            cat_j,
+        ));
+    }
+
+    (matched, rms_sum_sq)
 }
 
 /// Verify a single correspondence configuration.
@@ -449,6 +816,7 @@ fn verify_single(
     swap_baseline: bool,
     swap_inner: bool,
     reflect_y: bool,
+    should_abort: &mut impl FnMut() -> bool,
 ) -> Option<VerifiedSolution> {
     // Image points: [baseline_A, baseline_B, inner_0, inner_1]
     let img_pts = candidate.image_quad.points;
@@ -464,10 +832,7 @@ fn verify_single(
     // that we use to estimate the field center.
     let mut cat_pts_init = [(0.0, 0.0); 4];
     for i in 0..4 {
-        cat_pts_init[i] = candidate.tangent_plane.project(cat_vecs[i])?;
-    }
-    if reflect_y {
-        for p in &mut cat_pts_init { p.1 = -p.1; }
+        cat_pts_init[i] = candidate.tangent_plane.project_matching(cat_vecs[i], reflect_y)?;
     }
     let src = [img_pts[0], img_pts[1], img_pts[2], img_pts[3]];
     let dst_init = [cat_pts_init[0], cat_pts_init[1], cat_pts_init[2], cat_pts_init[3]];
@@ -496,16 +861,15 @@ fn verify_single(
     let (cx, cy) = (cx / n, cy / n);
 
     let (fc_xi, fc_eta) = affine_init.apply(cx, cy);
-    let field_center = candidate.tangent_plane.unproject(fc_xi, fc_eta);
+    let field_center = candidate
+        .tangent_plane
+        .unproject_matching(fc_xi, fc_eta, reflect_y);
     let field_tp = TangentPlane::at(field_center);
 
     // Re-project the 4 catalog stars to the field-centered tangent plane.
     let mut cat_pts = [(0.0, 0.0); 4];
     for i in 0..4 {
-        cat_pts[i] = field_tp.project(cat_vecs[i])?;
-    }
-    if reflect_y {
-        for p in &mut cat_pts { p.1 = -p.1; }
+        cat_pts[i] = field_tp.project_matching(cat_vecs[i], reflect_y)?;
     }
     let dst = [cat_pts[0], cat_pts[1], cat_pts[2], cat_pts[3]];
     let affine = Affine2D::fit(&src, &dst)?;
@@ -513,19 +877,21 @@ fn verify_single(
     // Project ALL catalog stars to the field-centered tangent plane.
     // If reflect_y is set, flip eta for ALL stars (not just the 4 pattern
     // stars) — the entire coordinate system is mirrored.
-    let cat_tangent_all: Vec<(f64, f64)> = db
-        .stars
-        .iter()
-        .map(|s| {
-            let v = Vec3::new(s.x_unit as f64, s.y_unit as f64, s.z_unit as f64);
-            match field_tp.project(v) {
-                Some((xi, eta)) => {
-                    if reflect_y { (xi, -eta) } else { (xi, eta) }
-                }
-                None => (f64::MAX, 0.0),
-            }
-        })
-        .collect();
+    if should_abort() {
+        return None;
+    }
+    let mut cat_tangent_all = Vec::with_capacity(db.stars.len());
+    for (idx, s) in db.stars.iter().enumerate() {
+        if idx > 0 && idx % 512 == 0 && should_abort() {
+            return None;
+        }
+        let v = Vec3::new(s.x_unit as f64, s.y_unit as f64, s.z_unit as f64);
+        cat_tangent_all.push(
+            field_tp
+                .project_matching(v, reflect_y)
+                .unwrap_or((f64::MAX, 0.0)),
+        );
+    }
 
     // Build spatial grid for O(1) nearest-neighbor lookups.
     // Cell size = widest search radius so a 3×3 cell query always suffices.
@@ -551,35 +917,34 @@ fn verify_single(
     let mut quad: Option<RadialQuad2D> = None;
 
     for _iter in 0..iter_radii_arcsec.len() {
+        if should_abort() {
+            return None;
+        }
         let iter_threshold_rad =
             iter_radii_arcsec[_iter] / 3600.0 * std::f64::consts::PI / 180.0;
+
+        let apply = |x: f64, y: f64| match quad {
+            Some(q) => q.apply(x, y),
+            None => affine.apply(x, y),
+        };
 
         matched.clear();
         refine_source_pts.clear();
         refine_catalog_pts.clear();
 
-        for s in sources.iter() {
-            let (xi, eta) = match quad {
-                Some(q) => q.apply(s.x_px, s.y_px),
-                None => affine.apply(s.x_px, s.y_px),
-            };
+        let (iter_matched, _) = match_sources_one_to_one(
+            sources,
+            apply,
+            &grid,
+            &cat_tangent_all,
+            db,
+            iter_threshold_rad,
+        );
 
-            if let Some((best_j, _)) = grid.nearest_within(&cat_tangent_all, xi, eta, iter_threshold_rad) {
-                let star = &db.stars[best_j];
-                let (ra, dec) = (
-                    (star.ra_rad as f64).to_degrees().rem_euclid(360.0),
-                    (star.dec_rad as f64).to_degrees(),
-                );
-                refine_source_pts.push((s.x_px, s.y_px));
-                refine_catalog_pts.push(cat_tangent_all[best_j]);
-                matched.push(MatchedStarInfo {
-                    image_x: s.x_px,
-                    image_y: s.y_px,
-                    catalog_id: star.catalog_id,
-                    ra_deg: ra,
-                    dec_deg: dec,
-                });
-            }
+        for (m, cat_j) in &iter_matched {
+            refine_source_pts.push((m.image_x, m.image_y));
+            refine_catalog_pts.push(cat_tangent_all[*cat_j]);
+            matched.push(m.clone());
         }
 
         // Refit with radial-quadratic (handles distortion) when we
@@ -598,29 +963,23 @@ fn verify_single(
     }
 
     // Final re-match at the tightest radius.
-    matched.clear();
-    rms_sum_sq = 0.0;
-    for s in sources.iter() {
-        let (xi, eta) = match quad {
-            Some(q) => q.apply(s.x_px, s.y_px),
-            None => affine.apply(s.x_px, s.y_px),
-        };
-        if let Some((best_j, best_dist_sq)) = grid.nearest_within(&cat_tangent_all, xi, eta, final_threshold_rad) {
-            let star = &db.stars[best_j];
-            rms_sum_sq += best_dist_sq;
-            let (ra, dec) = (
-                (star.ra_rad as f64).to_degrees().rem_euclid(360.0),
-                (star.dec_rad as f64).to_degrees(),
-            );
-            matched.push(MatchedStarInfo {
-                image_x: s.x_px,
-                image_y: s.y_px,
-                catalog_id: star.catalog_id,
-                ra_deg: ra,
-                dec_deg: dec,
-            });
-        }
+    if should_abort() {
+        return None;
     }
+    let apply_final = |x: f64, y: f64| match quad {
+        Some(q) => q.apply(x, y),
+        None => affine.apply(x, y),
+    };
+    let (final_matched, final_rms_sum_sq) = match_sources_one_to_one(
+        sources,
+        apply_final,
+        &grid,
+        &cat_tangent_all,
+        db,
+        final_threshold_rad,
+    );
+    matched = final_matched.into_iter().map(|(m, _)| m).collect();
+    rms_sum_sq = final_rms_sum_sq;
 
     if (matched.len() as u32) < MIN_MATCHED_STARS {
         return None;
@@ -644,6 +1003,7 @@ fn verify_single(
         rms_arcsec,
         transform,
         tangent_plane: field_tp,
+        reflect_y,
         matched,
     })
 }
@@ -654,11 +1014,12 @@ fn image_center_to_radec(
     tp: &TangentPlane,
     width_px: u32,
     height_px: u32,
+    reflect_y: bool,
 ) -> (f64, f64) {
     let center_x = width_px as f64 / 2.0;
     let center_y = height_px as f64 / 2.0;
     let (xi, eta) = transform.apply(center_x, center_y);
-    let vec = tp.unproject(xi, eta);
+    let vec = tp.unproject_matching(xi, eta, reflect_y);
     crate::geometry::unit_to_radec(vec)
 }
 
@@ -703,7 +1064,7 @@ mod tests {
         header[8..12].copy_from_slice(&n_stars.to_le_bytes());
         header[12..16].copy_from_slice(&n_patterns.to_le_bytes());
         header[16..20].copy_from_slice(&10.0f32.to_le_bytes());
-        header[20..24].copy_from_slice(&30.0f32.to_le_bytes());
+        header[20..24].copy_from_slice(&60.0f32.to_le_bytes());
         header[24..28].copy_from_slice(&7.0f32.to_le_bytes());
         header[28..32].copy_from_slice(&2000u32.to_le_bytes());
         header[32..36].copy_from_slice(&4u32.to_le_bytes());
@@ -736,6 +1097,91 @@ mod tests {
         }
 
         path
+    }
+
+    #[test]
+    fn test_solve_cancel_flag() {
+        clear_solve_cancel();
+        assert!(!is_solve_cancelled());
+        request_solve_cancel();
+        assert!(is_solve_cancelled());
+        clear_solve_cancel();
+        assert!(!is_solve_cancelled());
+    }
+
+    #[test]
+    fn test_solve_prepared_respects_cancel_flag() {
+        let dir = tempdir().unwrap();
+        let db_path = make_test_db(dir.path());
+        let prepared = PreparedDatabase::load(&db_path).unwrap();
+
+        clear_solve_cancel();
+        request_solve_cancel();
+
+        let sources: Vec<ImageSource> = (0..12)
+            .map(|i| ImageSource {
+                x_px: i as f64 * 25.0,
+                y_px: (i as f64 % 4.0) * 30.0,
+                flux: Some(12.0 - i as f64),
+            })
+            .collect();
+
+        let req = SolveSourcesRequest {
+            sources,
+            image_width_px: 1200,
+            image_height_px: 1600,
+            fov_estimate_deg: None,
+            fov_max_error_deg: None,
+            database_path: db_path.to_string_lossy().to_string(),
+            solve_timeout_ms: None,
+        };
+
+        let result = solve_prepared(&req, &prepared, "test");
+        clear_solve_cancel();
+
+        assert!(!result.success);
+        assert!(
+            result.log.iter().any(|l| l.contains("cancelled by client")),
+            "expected cancel log, got: {:?}",
+            result.log
+        );
+    }
+
+    #[test]
+    fn test_solve_prepared_times_out_immediately() {
+        let dir = tempdir().unwrap();
+        let db_path = make_test_db(dir.path());
+        let prepared = PreparedDatabase::load(&db_path).unwrap();
+
+        let sources: Vec<ImageSource> = (0..25)
+            .map(|i| ImageSource {
+                x_px: i as f64 * 18.0,
+                y_px: (i as f64 % 5.0) * 22.0,
+                flux: Some(25.0 - i as f64),
+            })
+            .collect();
+
+        let req = SolveSourcesRequest {
+            sources,
+            image_width_px: 1200,
+            image_height_px: 1600,
+            fov_estimate_deg: None,
+            fov_max_error_deg: None,
+            database_path: db_path.to_string_lossy().to_string(),
+            solve_timeout_ms: Some(1.0),
+        };
+
+        clear_solve_cancel();
+        assert!(!is_solve_cancelled(), "cancel flag must be clear for timeout test");
+        let result = solve_prepared(&req, &prepared, "test");
+        clear_solve_cancel();
+
+        assert!(!result.success);
+        assert!(
+            result.log.iter().any(|l| l.contains("timed out")),
+            "expected timeout log, got: {:?}",
+            result.log
+        );
     }
 
     #[test]
@@ -824,7 +1270,7 @@ mod tests {
             sources,
             image_width_px: 1200,
             image_height_px: 1600,
-            fov_estimate_deg: Some(1.0),
+            fov_estimate_deg: None,
             fov_max_error_deg: None,
             database_path: db_path.to_string_lossy().to_string(),
             solve_timeout_ms: Some(5000.0),
@@ -859,6 +1305,91 @@ mod tests {
         assert!(result.solve_time_ms < 10000);
     }
 
+    fn make_minimal_db(star_count: usize) -> crate::db::AdbDatabase {
+        crate::db::AdbDatabase {
+            header: crate::db::AdbHeader {
+                version: 1,
+                n_stars: star_count as u32,
+                n_patterns: 0,
+                min_fov_deg: 10.0,
+                max_fov_deg: 60.0,
+                max_mag: 7.0,
+                epoch: 2000,
+                pattern_size: 4,
+                pattern_bins: 50,
+            },
+            stars: (0..star_count)
+                .map(|i| crate::db::StarRecord {
+                    catalog_id: (i + 1) as u32,
+                    ra_rad: 0.0,
+                    dec_rad: 0.0,
+                    x_unit: 0.0,
+                    y_unit: 0.0,
+                    z_unit: 1.0,
+                    mag: 5.0,
+                })
+                .collect(),
+            patterns: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn test_match_sources_one_to_one_no_duplicate_catalog() {
+        let db = make_minimal_db(2);
+        let cat_tangent_all = vec![(0.0, 0.0), (1.0, 0.0)];
+        let grid = CatalogGrid::build(&cat_tangent_all, 0.25);
+        let identity = |x: f64, y: f64| (x, y);
+
+        // Two sources cluster near catalog star 0; greedy one-to-one should claim only one.
+        let crowded_sources = vec![
+            ImageSource {
+                x_px: 0.01,
+                y_px: 0.0,
+                flux: None,
+            },
+            ImageSource {
+                x_px: 0.03,
+                y_px: 0.0,
+                flux: None,
+            },
+        ];
+        let (crowded_matches, _) = match_sources_one_to_one(
+            &crowded_sources,
+            identity,
+            &grid,
+            &cat_tangent_all,
+            &db,
+            0.2,
+        );
+        assert_eq!(crowded_matches.len(), 1, "only one source should claim catalog star 0");
+        assert_eq!(crowded_matches[0].0.catalog_id, 1);
+
+        // Crossed nearest-neighbor case: each source is closest to the opposite catalog star.
+        let crossed_sources = vec![
+            ImageSource {
+                x_px: 0.55,
+                y_px: 0.0,
+                flux: None,
+            },
+            ImageSource {
+                x_px: 0.45,
+                y_px: 0.0,
+                flux: None,
+            },
+        ];
+        let (crossed_matches, _) = match_sources_one_to_one(
+            &crossed_sources,
+            identity,
+            &grid,
+            &cat_tangent_all,
+            &db,
+            0.6,
+        );
+        assert_eq!(crossed_matches.len(), 2, "both sources should match uniquely");
+        let assigned: Vec<usize> = crossed_matches.iter().map(|(_, cat_j)| *cat_j).collect();
+        assert_eq!(assigned.len(), assigned.iter().collect::<std::collections::HashSet<_>>().len());
+    }
+
     #[test]
     fn test_solve_returns_detected_stars() {
         let dir = tempdir().unwrap();
@@ -882,5 +1413,199 @@ mod tests {
         let result = solve_sources(&req);
         // Even on failure, detected stars should be populated.
         assert_eq!(result.detected_stars.len(), 2);
+    }
+
+    /// Wrong-star distractor patterns plus the true pattern listed last.
+    fn make_adversarial_ranking_db(
+        true_pattern: [u16; 4],
+        distractor_count: usize,
+    ) -> crate::db::AdbDatabase {
+        use crate::db::{AdbHeader, PatternRecord, StarRecord};
+        use crate::geometry::{radec_to_unit, unit_to_radec};
+
+        let field_stars: [(f64, f64); 8] = [
+            (45.0, 20.0),
+            (46.0, 20.0),
+            (45.5, 20.5),
+            (45.2, 19.8),
+            (45.8, 20.3),
+            (44.7, 20.1),
+            (45.3, 19.5),
+            (44.5, 19.9),
+        ];
+
+        let mut stars: Vec<StarRecord> = field_stars
+            .iter()
+            .enumerate()
+            .map(|(i, &(ra, dec))| {
+                let vec = radec_to_unit(ra, dec);
+                StarRecord {
+                    catalog_id: (i + 1) as u32,
+                    ra_rad: ra.to_radians() as f32,
+                    dec_rad: dec.to_radians() as f32,
+                    x_unit: vec.x as f32,
+                    y_unit: vec.y as f32,
+                    z_unit: vec.z as f32,
+                    mag: 5.0 + i as f32 * 0.05,
+                }
+            })
+            .collect();
+
+        let pivot = radec_to_unit(44.0, 19.0);
+        let axis = pivot.cross(Vec3::new(0.0, 0.0, 1.0)).normalize();
+        for seed in 0..distractor_count {
+            let angle = (seed as f64 + 1.0) * 0.02;
+            let vec = pivot
+                .scale(angle.cos())
+                .add(axis.scale(angle.sin()))
+                .normalize();
+            let (ra, dec) = unit_to_radec(vec);
+            stars.push(StarRecord {
+                catalog_id: stars.len() as u32 + 1,
+                ra_rad: ra.to_radians() as f32,
+                dec_rad: dec.to_radians() as f32,
+                x_unit: vec.x as f32,
+                y_unit: vec.y as f32,
+                z_unit: vec.z as f32,
+                mag: 8.5,
+            });
+        }
+
+        let filler_base = 8usize;
+        let mut patterns: Vec<PatternRecord> = (0..distractor_count)
+            .map(|i| PatternRecord {
+                star_indices: [
+                    4,
+                    5,
+                    6,
+                    (filler_base + i) as u16,
+                ],
+            })
+            .collect();
+        patterns.push(PatternRecord {
+            star_indices: true_pattern,
+        });
+
+        crate::db::AdbDatabase {
+            header: AdbHeader {
+                version: 1,
+                n_stars: stars.len() as u32,
+                n_patterns: patterns.len() as u32,
+                min_fov_deg: 10.0,
+                max_fov_deg: 60.0,
+                max_mag: 7.0,
+                epoch: 2000,
+                pattern_size: 4,
+                pattern_bins: 50,
+            },
+            stars,
+            patterns,
+        }
+    }
+
+    #[test]
+    fn test_candidate_ranking_survives_dense_hash_bucket() {
+        let dir = tempdir().unwrap();
+        let db_path = make_test_db(dir.path());
+        let db = crate::db::load_database(&db_path).unwrap();
+        let center = crate::geometry::radec_to_unit(45.5, 20.0);
+        let tp = TangentPlane::at(center);
+
+        let pixel_scale = 0.02_f64.to_radians();
+        let roll = 10.0_f64.to_radians();
+        let offset_x = 600.0;
+        let offset_y = 800.0;
+        let cr = roll.cos();
+        let sr = roll.sin();
+
+        let mut sources = Vec::new();
+        for (i, star) in db.stars.iter().enumerate() {
+            let vec = Vec3::new(star.x_unit as f64, star.y_unit as f64, star.z_unit as f64);
+            if let Some((xi, eta)) = tp.project(vec) {
+                let px = offset_x + (xi * cr - eta * sr) / pixel_scale;
+                let py = offset_y + (xi * sr + eta * cr) / pixel_scale;
+                if px > 0.0 && px < 1200.0 && py > 0.0 && py < 1600.0 {
+                    sources.push(ImageSource {
+                        x_px: px,
+                        y_px: py,
+                        flux: Some(20.0 - i as f64),
+                    });
+                }
+            }
+        }
+        assert!(sources.len() >= 8, "need a rich synthetic field");
+
+        let hash_index = crate::hash::HashIndex::build(&db);
+        let image_quads = generate_image_quads(
+            &sources,
+            MAX_SOURCES_FOR_QUADS,
+            MIN_BASELINE_PX,
+            hash_index.bin_size,
+            || false,
+        );
+        assert!(!image_quads.is_empty());
+
+        // Pick the image quad that best matches the true catalog pattern [0,1,2,3].
+        let true_pattern = [0u16, 1, 2, 3];
+        let cat_vecs: [Vec3; 4] = [
+            Vec3::new(db.stars[0].x_unit as f64, db.stars[0].y_unit as f64, db.stars[0].z_unit as f64),
+            Vec3::new(db.stars[1].x_unit as f64, db.stars[1].y_unit as f64, db.stars[1].z_unit as f64),
+            Vec3::new(db.stars[2].x_unit as f64, db.stars[2].y_unit as f64, db.stars[2].z_unit as f64),
+            Vec3::new(db.stars[3].x_unit as f64, db.stars[3].y_unit as f64, db.stars[3].z_unit as f64),
+        ];
+        let true_hash = compute_quad_hash(&dist_matrix_3d(&cat_vecs), hash_index.bin_size).unwrap();
+
+        let target_quad = image_quads
+            .iter()
+            .min_by(|a, b| {
+                let da = quad_feature_dist_sq(&a.feature, &true_hash.feature);
+                let db = quad_feature_dist_sq(&b.feature, &true_hash.feature);
+                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .expect("image quad matching true pattern");
+
+        let adversarial_db = make_adversarial_ranking_db(
+            true_pattern,
+            MAX_GLOBAL_CANDIDATES + MAX_CANDIDATES_PER_QUAD,
+        );
+        assert!(
+            adversarial_db.patterns.len() > MAX_GLOBAL_CANDIDATES,
+            "adversarial DB must exceed global candidate cap"
+        );
+
+        let true_pattern_idx = (adversarial_db.patterns.len() - 1) as u32;
+        let mut prepared = PreparedDatabase::from_database(adversarial_db);
+        for pattern_idx in 0..true_pattern_idx {
+            prepared
+                .hash_index
+                .inject_pattern_for_test(target_quad.hash, pattern_idx);
+        }
+
+        let req = SolveSourcesRequest {
+            sources,
+            image_width_px: 1200,
+            image_height_px: 1600,
+            fov_estimate_deg: None,
+            fov_max_error_deg: None,
+            database_path: db_path.to_string_lossy().to_string(),
+            solve_timeout_ms: Some(30_000.0),
+        };
+
+        let result = solve_prepared(&req, &prepared, "adversarial");
+
+        for line in &result.log {
+            eprintln!("  [adversarial] {}", line);
+        }
+
+        assert!(
+            result.success,
+            "ranked candidate selection should keep the true match. Log: {:?}",
+            result.log
+        );
+        let ra_err = (result.ra_deg.unwrap() - 45.5).abs().min(
+            (result.ra_deg.unwrap() + 360.0 - 45.5).abs(),
+        );
+        assert!(ra_err < 2.0, "RA should be near 45.5°");
+        assert!((result.dec_deg.unwrap() - 20.0).abs() < 2.0, "Dec should be near 20.0°");
     }
 }

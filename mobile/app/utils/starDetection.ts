@@ -24,6 +24,8 @@
  * 7. Return sorted by brightness (brightest first)
  */
 
+import UPNG from 'upng-js';
+
 export interface DetectedStar {
   x: number;
   y: number;
@@ -123,9 +125,39 @@ export async function detectStars(
     throw new Error("Failed to load image pixels");
   }
 
-  const pixels = new Uint8ClampedArray(Buffer.from(base64, "base64"));
-  const stars = detectStarsFromPixels(pixels, width, height, options);
-  return { stars, imageWidth: width, imageHeight: height };
+  const { pixels, width: decodedWidth, height: decodedHeight } = decodePngBase64(base64);
+  const stars = detectStarsFromPixels(pixels, decodedWidth, decodedHeight, options);
+  return {
+    stars,
+    imageWidth: decodedWidth || width,
+    imageHeight: decodedHeight || height,
+  };
+}
+
+function decodePngBase64(
+  base64: string
+): { pixels: Uint8ClampedArray; width: number; height: number } {
+  const pngBytes = base64ToUint8(base64);
+  const png = UPNG.decode(pngBytes.buffer as ArrayBuffer);
+  const rgbaFrames = UPNG.toRGBA8(png);
+  if (!rgbaFrames.length) {
+    throw new Error("Failed to decode PNG image");
+  }
+
+  return {
+    pixels: new Uint8ClampedArray(rgbaFrames[0]),
+    width: png.width,
+    height: png.height,
+  };
+}
+
+function base64ToUint8(base64: string): Uint8Array {
+  const binaryString = atob(base64);
+  const bytes = new Uint8Array(binaryString.length);
+  for (let i = 0; i < binaryString.length; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+  return bytes;
 }
 
 /** Convert RGBA pixel array to grayscale float values. */

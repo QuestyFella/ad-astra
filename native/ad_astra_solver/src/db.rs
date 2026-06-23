@@ -3,6 +3,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 use crate::error::SolverError;
+use crate::hash::HashIndex;
 
 pub const MAGIC: [u8; 4] = *b"ADB\0";
 pub const HEADER_SIZE: usize = 64;
@@ -243,6 +244,33 @@ pub fn load_database(path: &Path) -> Result<AdbDatabase, SolverError> {
         stars,
         patterns,
     })
+}
+
+/// Database plus pre-built hash index for repeated solves.
+#[derive(Debug, Clone)]
+pub struct PreparedDatabase {
+    pub db: AdbDatabase,
+    pub hash_index: HashIndex,
+}
+
+impl PreparedDatabase {
+    /// Build the hash index from an already-loaded database.
+    pub fn from_database(db: AdbDatabase) -> Self {
+        let hash_index = HashIndex::build(&db);
+        Self { db, hash_index }
+    }
+
+    /// Load a database from disk and build its hash index once.
+    pub fn load(path: &Path) -> Result<Self, SolverError> {
+        let db = load_database(path)?;
+        Ok(Self::from_database(db))
+    }
+
+    /// Parse database bytes and build its hash index once.
+    pub fn from_bytes(data: &[u8]) -> Result<Self, SolverError> {
+        let db = load_database_from_bytes(data)?;
+        Ok(Self::from_database(db))
+    }
 }
 
 #[cfg(test)]

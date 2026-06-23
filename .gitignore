@@ -10,6 +10,8 @@ data/processed/*
 !data/raw/.gitkeep
 !data/processed/.gitkeep
 .DS_Store
+design.md
+solver-logic-review.md
 
 # Mobile
 mobile/node_modules/

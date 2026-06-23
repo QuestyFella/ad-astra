@@ -6,9 +6,24 @@ use jni::objects::{JClass, JString};
 use jni::sys::{jint, jstring};
 use jni::JNIEnv;
 
-use ad_astra_solver::db::AdbDatabase;
+use ad_astra_solver::db::PreparedDatabase;
+use ad_astra_solver::solve::{clear_solve_cancel, request_solve_cancel};
+use ad_astra_solver::types::{ImageSource, SolveSourcesRequest};
+use serde::Deserialize;
 
-static DB: LazyLock<Mutex<Option<AdbDatabase>>> = LazyLock::new(|| Mutex::new(None));
+static DB: LazyLock<Mutex<Option<PreparedDatabase>>> = LazyLock::new(|| Mutex::new(None));
+
+#[derive(Deserialize)]
+struct SolveSourcesInput {
+    #[serde(default)]
+    sources: Vec<ImageSource>,
+    #[serde(default)]
+    fov_estimate_deg: Option<f32>,
+    #[serde(default)]
+    fov_max_error_deg: Option<f32>,
+    #[serde(default)]
+    solve_timeout_ms: Option<f64>,
+}
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -77,7 +92,7 @@ pub extern "system" fn Java_expo_modules_adastrasolver_AdAstraSolverModule_nativ
         if guard.is_some() {
             return Err("Database already loaded. Call nativeUnloadDatabase first.".to_string());
         }
-        *guard = Some(db);
+        *guard = Some(PreparedDatabase::from_database(db));
         Ok(summary.to_string())
     });
 
@@ -98,40 +113,67 @@ pub extern "system" fn Java_expo_modules_adastrasolver_AdAstraSolverModule_nativ
     width: jint,
     height: jint,
 ) -> jstring {
+    clear_solve_cancel();
     let result = safe_catch(|| -> Result<String, String> {
         let json_str = string_from_env(&mut env, &sources_json)?;
-        let sources: Vec<ad_astra_solver::types::ImageSource> =
-            serde_json::from_str(&json_str)
+        let input: SolveSourcesInput = if json_str.trim_start().starts_with('[') {
+            let sources: Vec<ImageSource> = serde_json::from_str(&json_str)
                 .map_err(|e| format!("Failed to parse sources JSON: {}", e))?;
-
-        let db = {
-            let guard = DB.lock().map_err(|e| format!("Mutex error: {}", e))?;
-            guard
-                .as_ref()
-                .ok_or_else(|| {
-                    "Database not loaded. Call nativeLoadDatabase first.".to_string()
-                })?
-                .clone()
+            SolveSourcesInput {
+                sources,
+                fov_estimate_deg: None,
+                fov_max_error_deg: None,
+                solve_timeout_ms: None,
+            }
+        } else {
+            serde_json::from_str(&json_str)
+                .map_err(|e| format!("Failed to parse solve request JSON: {}", e))?
         };
 
-        let request = ad_astra_solver::types::SolveSourcesRequest {
-            sources,
+        let guard = DB.lock().map_err(|e| format!("Mutex error: {}", e))?;
+        let prepared = guard
+            .as_ref()
+            .ok_or_else(|| {
+                "Database not loaded. Call nativeLoadDatabase first.".to_string()
+            })?;
+
+        let request = SolveSourcesRequest {
+            sources: input.sources,
             image_width_px: width as u32,
             image_height_px: height as u32,
-            fov_estimate_deg: None,
-            fov_max_error_deg: None,
+            fov_estimate_deg: input.fov_estimate_deg,
+            fov_max_error_deg: input.fov_max_error_deg,
             database_path: String::new(),
-            solve_timeout_ms: None,
+            solve_timeout_ms: input.solve_timeout_ms,
         };
 
-        let result = ad_astra_solver::solve::solve_sources_with_db(&request, db, "adb");
+        let result = ad_astra_solver::solve::solve_prepared(&request, prepared, "adb");
         serde_json::to_string(&result)
             .map_err(|e| format!("Failed to serialize solve result: {}", e))
     });
+    clear_solve_cancel();
 
     match result {
         Ok(Ok(msg)) => to_java_string(&mut env, &msg),
         Ok(Err(e)) => to_java_string(&mut env, &json_error(&e)),
+        Err(e) => to_java_string(&mut env, &json_error(&e)),
+    }
+}
+
+// ── Cancel solve ────────────────────────────────────────────────────────────
+
+#[no_mangle]
+pub extern "system" fn Java_expo_modules_adastrasolver_AdAstraSolverModule_nativeCancelSolve(
+    mut env: JNIEnv,
+    _class: JClass,
+) -> jstring {
+    let result = safe_catch(|| -> String {
+        request_solve_cancel();
+        serde_json::json!({"success": true}).to_string()
+    });
+
+    match result {
+        Ok(msg) => to_java_string(&mut env, &msg),
         Err(e) => to_java_string(&mut env, &json_error(&e)),
     }
 }

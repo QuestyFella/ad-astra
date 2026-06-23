@@ -63,6 +63,10 @@ export interface SolverConfig {
   minStars: number;
   catalogId: string;
   showDebugOverlay: boolean;
+  /** Expected field of view in degrees (wide-angle phone astro default). */
+  fovEstimateDeg: number;
+  /** Allowed deviation from fovEstimateDeg; defaults to estimate when omitted. */
+  fovMaxErrorDeg: number;
 }
 
 export const STEP_LABELS: Record<SolverStep, string> = {

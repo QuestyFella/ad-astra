@@ -68,6 +68,11 @@ pub fn chord_distance(a: Vec3, b: Vec3) -> f64 {
     a.sub(b).norm()
 }
 
+/// Angular separation between two unit vectors, in degrees.
+pub fn angular_separation_deg(a: Vec3, b: Vec3) -> f64 {
+    a.dot(b).clamp(-1.0, 1.0).acos().to_degrees()
+}
+
 /// Convert a unit vector to equatorial coordinates in degrees.
 pub fn unit_to_radec(v: Vec3) -> (f64, f64) {
     let dec = v.z.asin().to_degrees();
@@ -131,6 +136,35 @@ impl TangentPlane {
             .add(self.e1.scale(xi))
             .add(self.e2.scale(eta))
             .normalize()
+    }
+
+    /// Convert standard tangent-plane coords to catalog-matching coords.
+    ///
+    /// When `reflect_y` is true, η is negated to resolve the mirror-image
+    /// ambiguity from the unsigned |η| in the quad hash.
+    pub fn to_matching_coords(&self, xi: f64, eta: f64, reflect_y: bool) -> (f64, f64) {
+        if reflect_y {
+            (xi, -eta)
+        } else {
+            (xi, eta)
+        }
+    }
+
+    /// Convert catalog-matching coords back to standard tangent-plane coords.
+    pub fn from_matching_coords(&self, xi: f64, eta: f64, reflect_y: bool) -> (f64, f64) {
+        self.to_matching_coords(xi, eta, reflect_y)
+    }
+
+    /// Forward projection into catalog-matching coords.
+    pub fn project_matching(&self, v: Vec3, reflect_y: bool) -> Option<(f64, f64)> {
+        self.project(v)
+            .map(|(xi, eta)| self.to_matching_coords(xi, eta, reflect_y))
+    }
+
+    /// Inverse projection from catalog-matching coords.
+    pub fn unproject_matching(&self, xi: f64, eta: f64, reflect_y: bool) -> Vec3 {
+        let (xi, eta) = self.from_matching_coords(xi, eta, reflect_y);
+        self.unproject(xi, eta)
     }
 }
 
@@ -313,6 +347,55 @@ impl RadialQuad2D {
             c: self.e, d: self.f, ty: self.g,
         }
     }
+
+    /// Local pixel scales (tangent-plane radians per pixel) along X and Y axes.
+    pub fn pixel_scales_at(&self, px: f64, py: f64) -> (f64, f64) {
+        let dr2_dpx = 2.0 * (px - self.cx);
+        let dr2_dpy = 2.0 * (py - self.cy);
+        let dxi_dpx = self.a + self.d * dr2_dpx;
+        let dxi_dpy = self.b + self.d * dr2_dpy;
+        let deta_dpx = self.e + self.h * dr2_dpx;
+        let deta_dpy = self.f + self.h * dr2_dpy;
+        let scale_x = (dxi_dpx * dxi_dpx + deta_dpx * deta_dpx).sqrt();
+        let scale_y = (dxi_dpy * dxi_dpy + deta_dpy * deta_dpy).sqrt();
+        (scale_x, scale_y)
+    }
+}
+
+/// Exact edge-to-edge angular FOV from a fitted image→tangent transform.
+///
+/// Transforms edge midpoints through `transform`, unprojects via `tp`, and
+/// measures the angular span along each image axis. Returns `None` if any
+/// edge point falls on or behind the tangent plane.
+pub fn image_angular_fov_deg(
+    transform: &RadialQuad2D,
+    tp: &TangentPlane,
+    width_px: u32,
+    height_px: u32,
+    reflect_y: bool,
+) -> Option<(f64, f64)> {
+    let w = width_px as f64;
+    let h = height_px as f64;
+    let mid_x = w / 2.0;
+    let mid_y = h / 2.0;
+
+    let to_sky = |px: f64, py: f64| -> Option<Vec3> {
+        let (xi, eta) = transform.apply(px, py);
+        let v = tp.unproject_matching(xi, eta, reflect_y);
+        if v.dot(tp.center) <= 1e-9 {
+            return None;
+        }
+        Some(v)
+    };
+
+    let left = to_sky(0.0, mid_y)?;
+    let right = to_sky(w, mid_y)?;
+    let top = to_sky(mid_x, 0.0)?;
+    let bottom = to_sky(mid_x, h)?;
+
+    let fov_x = angular_separation_deg(left, right);
+    let fov_y = angular_separation_deg(top, bottom);
+    Some((fov_x, fov_y))
 }
 
 /// Solve two 4×4 linear systems sharing the same matrix via Gaussian
@@ -458,6 +541,23 @@ mod tests {
     }
 
     #[test]
+    fn test_tangent_plane_matching_coords_reflect() {
+        let center = radec_to_unit(45.5, 20.0);
+        let tp = TangentPlane::at(center);
+        let star = radec_to_unit(46.0, 20.5);
+
+        let (xi, eta) = tp.project(star).unwrap();
+        let (xi_m, eta_m) = tp.to_matching_coords(xi, eta, true);
+        assert!((eta_m + eta).abs() < 1e-12);
+
+        let recovered = tp.unproject_matching(xi_m, eta_m, true);
+        let (ra1, dec1) = unit_to_radec(star);
+        let (ra2, dec2) = unit_to_radec(recovered);
+        assert!((ra1 - ra2).abs() < 1e-9);
+        assert!((dec1 - dec2).abs() < 1e-9);
+    }
+
+    #[test]
     fn test_tangent_plane_behind() {
         let center = radec_to_unit(0.0, 0.0);
         let tp = TangentPlane::at(center);
@@ -505,6 +605,117 @@ mod tests {
         let src = vec![(0.0, 0.0), (1.0, 1.0), (2.0, 2.0)];
         let dst = vec![(0.0, 0.0), (1.0, 1.0), (2.0, 2.0)];
         assert!(Affine2D::fit(&src, &dst).is_none());
+    }
+
+    #[test]
+    fn test_radial_quad_anisotropic_pixel_scales() {
+        let quad = RadialQuad2D {
+            cx: 100.0,
+            cy: 200.0,
+            a: 0.002,
+            b: 0.0,
+            c: 0.0,
+            d: 0.0,
+            e: 0.0,
+            f: 0.004,
+            g: 0.0,
+            h: 0.0,
+        };
+        let (scale_x, scale_y) = quad.pixel_scales_at(100.0, 200.0);
+        assert!((scale_x - 0.002).abs() < 1e-12);
+        assert!((scale_y - 0.004).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_image_angular_fov_wide_field_anisotropic() {
+        // Wide, anisotropic gnomonic field with 2:1 pixel aspect.
+        let width = 2400.0;
+        let height = 1200.0;
+        let cx = width / 2.0;
+        let cy = height / 2.0;
+
+        let center = radec_to_unit(90.0, 35.0);
+        let tp = TangentPlane::at(center);
+
+        // Gnomonic tangent coords grow as tan(u·θ); edge half-angles set the field width.
+        let half_x = 22.0_f64.to_radians();
+        let half_y = 14.0_f64.to_radians();
+
+        let gnomonic_coords = |px: f64, py: f64| -> (f64, f64) {
+            let u = (px - cx) / cx;
+            let v = (cy - py) / cy;
+            ((u * half_x).tan(), (v * half_y).tan())
+        };
+
+        let (left_xi, _) = gnomonic_coords(0.0, cy);
+        let (right_xi, _) = gnomonic_coords(width, cy);
+        let (_, top_eta) = gnomonic_coords(cx, 0.0);
+        let (_, bottom_eta) = gnomonic_coords(cx, height);
+        let left_sky = tp.unproject(left_xi, 0.0);
+        let right_sky = tp.unproject(right_xi, 0.0);
+        let top_sky = tp.unproject(0.0, top_eta);
+        let bottom_sky = tp.unproject(0.0, bottom_eta);
+        let true_fov_x = angular_separation_deg(left_sky, right_sky);
+        let true_fov_y = angular_separation_deg(top_sky, bottom_sky);
+
+        // Build pixel↔tangent correspondences from the gnomonic mapping.
+        let mut src = Vec::new();
+        let mut dst = Vec::new();
+        for iy in 0..=20 {
+            for ix in 0..=20 {
+                let px = ix as f64 / 20.0 * width;
+                let py = iy as f64 / 20.0 * height;
+                src.push((px, py));
+                dst.push(gnomonic_coords(px, py));
+            }
+        }
+
+        let quad = RadialQuad2D::fit(&src, &dst, cx, cy).expect("fit radial quad");
+
+        let (fov_x, fov_y) = image_angular_fov_deg(&quad, &tp, width as u32, height as u32, false)
+            .expect("angular FOV");
+
+        assert!(
+            (fov_x - true_fov_x).abs() < 1.0,
+            "FOV x: expected {:.2}°, got {:.3}°",
+            true_fov_x,
+            fov_x
+        );
+        assert!(
+            (fov_y - true_fov_y).abs() < 1.0,
+            "FOV y: expected {:.2}°, got {:.3}°",
+            true_fov_y,
+            fov_y
+        );
+        assert!(
+            (fov_x - fov_y).abs() > 8.0,
+            "anisotropic axes should differ: {:.3} vs {:.3}",
+            fov_x,
+            fov_y
+        );
+
+        // Exact edge-to-edge measurement beats center-Jacobian × dimension.
+        let (scale_x, scale_y) = quad.pixel_scales_at(cx, cy);
+        let jacobian_fov_x = scale_x.to_degrees() * width;
+        let jacobian_fov_y = scale_y.to_degrees() * height;
+        let jacobian_err_x = (jacobian_fov_x - true_fov_x).abs();
+        let jacobian_err_y = (jacobian_fov_y - true_fov_y).abs();
+        let angular_err_x = (fov_x - true_fov_x).abs();
+        let angular_err_y = (fov_y - true_fov_y).abs();
+        assert!(
+            angular_err_x < jacobian_err_x,
+            "angular FOV x err {:.2}° should beat Jacobian err {:.2}° (true {:.2}°)",
+            angular_err_x,
+            jacobian_err_x,
+            true_fov_x
+        );
+        assert!(
+            angular_err_y < jacobian_err_y,
+            "angular FOV y err {:.2}° should beat Jacobian err {:.2}° (true {:.2}°)",
+            angular_err_y,
+            jacobian_err_y,
+            true_fov_y
+        );
     }
 
     #[test]

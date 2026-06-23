@@ -1,17 +1,34 @@
 import React, { useEffect, useContext } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import {
+  View,
+  Text,
+  StyleSheet,
+  ActivityIndicator,
+  ScrollView,
+  Image,
+} from 'react-native';
 import type { SolvingScreenProps } from '../types/navigation';
 import { ThemeContext } from '../navigation/AppNavigator';
 import { getTheme } from '../theme/colors';
-import { useSolver } from '../store/solver';
+import { tokens } from '../theme/tokens';
+import { useSolver } from '../store/SolverProvider';
 import { STEP_ORDER, STEP_LABELS } from '../types/solver';
+import { useHideTabBar } from '../navigation/useHideTabBar';
+import {
+  ScreenShell,
+  ScreenHeader,
+  GroupedSection,
+  ListGroup,
+  ListRow,
+} from '../components/ui';
 
 export function SolvingScreen({ navigation, route }: SolvingScreenProps) {
   const { imageUri } = route.params;
   const { theme } = useContext(ThemeContext);
   const t = getTheme(theme);
   const { state, currentStep, result, startSolve, cancel } = useSolver();
+
+  useHideTabBar(navigation, t);
 
   useEffect(() => {
     startSolve(imageUri);
@@ -21,7 +38,7 @@ export function SolvingScreen({ navigation, route }: SolvingScreenProps) {
     if (state === 'solved' && result) {
       const timer = setTimeout(() => {
         navigation.replace('Result', { imageUri });
-      }, 600);
+      }, 500);
       return () => clearTimeout(timer);
     }
     if (state === 'cancelled') {
@@ -29,166 +46,149 @@ export function SolvingScreen({ navigation, route }: SolvingScreenProps) {
     }
   }, [state, result]);
 
-  const elapsed = result ? `${(result.solveTimeMs / 1000).toFixed(1)}s` : '…';
-  const detectedCount = result?.detectedStars.length ?? '…';
+  const elapsed = result ? `${(result.solveTimeMs / 1000).toFixed(1)}s` : '—';
+  const detectedCount =
+    result?.detectedStars.length != null
+      ? String(result.detectedStars.length)
+      : '—';
 
   const currentIdx = STEP_ORDER.indexOf(currentStep);
+  const activeIdx = state === 'solved' ? STEP_ORDER.length : currentIdx;
 
   return (
-    <SafeAreaView style={[styles.container, { backgroundColor: t.bg }]}>
-      <View style={styles.header}>
-        <ActivityIndicator size="large" color={t.accent} />
-        <Text style={[styles.title, { color: t.text }]}>Solving…</Text>
-        <Text style={[styles.subtitle, { color: t.textMuted }]}>
-          Matching star patterns
-        </Text>
-      </View>
+    <ScreenShell theme={t} edges={['top', 'bottom']}>
+      <ScreenHeader
+        theme={t}
+        title="Solving"
+        subtitle="Matching star patterns against the catalog"
+        compact
+        rightAction={{ label: 'Cancel', onPress: cancel }}
+      />
 
-      <View style={styles.steps}>
-        {STEP_ORDER.map((step, idx) => {
-          const isComplete = idx < currentIdx || (state === 'solved' && idx <= currentIdx);
-          const isActive = idx === currentIdx && state !== 'solved';
+      <ScrollView
+        contentContainerStyle={styles.scroll}
+        showsVerticalScrollIndicator={false}
+      >
+        <View
+          style={[
+            styles.preview,
+            { backgroundColor: t.surfaceDark, borderColor: t.hairline },
+          ]}
+        >
+          <Image source={{ uri: imageUri }} style={styles.previewImage} />
+        </View>
 
-          return (
-            <View key={step} style={styles.stepRow}>
-              <View style={styles.stepIndicator}>
-                {idx > 0 && (
-                  <View
-                    style={[
-                      styles.connector,
-                      { backgroundColor: isComplete ? t.success : t.cardBorder },
-                    ]}
-                  />
-                )}
-                {isComplete ? (
-                  <View style={[styles.dot, { backgroundColor: t.success }]} />
-                ) : isActive ? (
-                  <View style={[styles.dot, { backgroundColor: t.accent }]}>
-                    <ActivityIndicator size="small" color="#FFFFFF" />
-                  </View>
-                ) : (
-                  <View style={[styles.dot, { backgroundColor: t.cardBorder }]} />
-                )}
-              </View>
-              <Text
+        <GroupedSection theme={t} title="Progress">
+          {STEP_ORDER.map((step, idx) => {
+            const isComplete = idx < activeIdx;
+            const isActive = idx === activeIdx && state !== 'solved';
+
+            return (
+              <View
+                key={step}
                 style={[
-                  styles.stepLabel,
-                  {
-                    color: isComplete ? t.text : isActive ? t.text : t.textMuted,
-                    fontWeight: isActive ? '700' : '500',
+                  styles.progressRow,
+                  idx < STEP_ORDER.length - 1 && {
+                    borderBottomWidth: StyleSheet.hairlineWidth,
+                    borderBottomColor: t.hairlineSoft,
                   },
                 ]}
               >
-                {STEP_LABELS[step]}
-              </Text>
-            </View>
-          );
-        })}
-      </View>
+                <View
+                  style={[
+                    styles.stepBadge,
+                    {
+                      backgroundColor:
+                        isComplete || isActive ? t.primary : t.surfaceStrong,
+                    },
+                  ]}
+                >
+                  {isComplete ? (
+                    <Text style={[styles.stepIcon, { color: t.onPrimary }]}>
+                      ✓
+                    </Text>
+                  ) : isActive ? (
+                    <ActivityIndicator size="small" color={t.onPrimary} />
+                  ) : (
+                    <Text style={[styles.stepIcon, { color: t.textMuted }]}>
+                      {idx + 1}
+                    </Text>
+                  )}
+                </View>
+                <View style={styles.stepText}>
+                  <Text
+                    style={[
+                      styles.stepLabel,
+                      {
+                        color: isComplete || isActive ? t.ink : t.textMuted,
+                        fontWeight: isActive ? '600' : '400',
+                      },
+                    ]}
+                  >
+                    {STEP_LABELS[step]}
+                  </Text>
+                  {isActive && (
+                    <Text style={[styles.stepHint, { color: t.textMuted }]}>
+                      Working…
+                    </Text>
+                  )}
+                </View>
+              </View>
+            );
+          })}
+        </GroupedSection>
 
-      <View style={[styles.statsRow, { borderColor: t.cardBorder }]}>
-        <View style={styles.stat}>
-          <Text style={[styles.statValue, { color: t.text }]}>{detectedCount}</Text>
-          <Text style={[styles.statLabel, { color: t.textMuted }]}>Stars found</Text>
-        </View>
-        <View style={[styles.statDivider, { backgroundColor: t.cardBorder }]} />
-        <View style={styles.stat}>
-          <Text style={[styles.statValue, { color: t.text }]}>{elapsed}</Text>
-          <Text style={[styles.statLabel, { color: t.textMuted }]}>Elapsed</Text>
-        </View>
-      </View>
-
-      <TouchableOpacity
-        style={[styles.cancelBtn, { borderColor: t.cardBorder }]}
-        onPress={cancel}
-        activeOpacity={0.7}
-      >
-        <Text style={[styles.cancelText, { color: t.textMuted }]}>Cancel</Text>
-      </TouchableOpacity>
-    </SafeAreaView>
+        <ListGroup theme={t} title="Live stats">
+          <ListRow label="Stars found" value={detectedCount} />
+          <ListRow label="Elapsed" value={elapsed} />
+        </ListGroup>
+      </ScrollView>
+    </ScreenShell>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    paddingHorizontal: 32,
-    paddingTop: 24,
+  scroll: {
+    paddingBottom: tokens.space.xxl,
   },
-  header: {
-    alignItems: 'center',
-    marginBottom: 48,
+  preview: {
+    height: 160,
+    borderRadius: tokens.radius.lg,
+    overflow: 'hidden',
+    marginBottom: tokens.space.lg,
+    borderWidth: StyleSheet.hairlineWidth,
   },
-  title: {
-    fontSize: 28,
-    fontWeight: '700',
-    marginTop: 16,
+  previewImage: {
+    width: '100%',
+    height: '100%',
+    resizeMode: 'cover',
   },
-  subtitle: {
-    fontSize: 15,
-    marginTop: 4,
-  },
-  steps: {
-    marginBottom: 48,
-  },
-  stepRow: {
+  progressRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    height: 56,
+    paddingVertical: tokens.space.md,
+    paddingHorizontal: tokens.space.lg,
+    minHeight: 52,
   },
-  stepIndicator: {
-    width: 40,
-    alignItems: 'center',
-    marginRight: 12,
-  },
-  connector: {
-    width: 2,
-    height: 16,
-    marginBottom: 4,
-  },
-  dot: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
+  stepBadge: {
+    width: 28,
+    height: 28,
+    borderRadius: tokens.radius.sm,
     alignItems: 'center',
     justifyContent: 'center',
+    marginRight: tokens.space.md,
+  },
+  stepIcon: {
+    ...tokens.type.captionStrong,
+  },
+  stepText: {
+    flex: 1,
   },
   stepLabel: {
-    fontSize: 17,
-    flex: 1,
+    ...tokens.type.body,
   },
-  statsRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    borderTopWidth: 1,
-    paddingVertical: 24,
-    marginBottom: 24,
-  },
-  stat: {
-    flex: 1,
-    alignItems: 'center',
-  },
-  statDivider: {
-    width: 1,
-    height: 36,
-  },
-  statValue: {
-    fontSize: 32,
-    fontWeight: '700',
-  },
-  statLabel: {
-    fontSize: 13,
-    marginTop: 4,
-  },
-  cancelBtn: {
-    height: 52,
-    borderRadius: 14,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 1.5,
-  },
-  cancelText: {
-    fontSize: 16,
-    fontWeight: '600',
+  stepHint: {
+    ...tokens.type.caption,
+    marginTop: 2,
   },
 });
